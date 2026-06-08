@@ -72,3 +72,12 @@ jobs:
       # rust-toolchain.toml pins 1.96.0, so `+1.81.0` is required to override it
       # and actually verify the declared MSRV builds the library.
       - run: cargo +1.81.0 check
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

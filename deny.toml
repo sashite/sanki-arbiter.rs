@@ -1,1 +1,35 @@
-# cargo-deny: licenses, advisories, sources (placeholder).
+# cargo-deny configuration — run `cargo deny check`.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Security vulnerabilities and unsound advisories are denied by default;
+# unmaintained and yanked crates are reported. Add a RustSec ID here only with a
+# documented justification.
+ignore = []
+
+[licenses]
+# Permissive licenses only; the crate itself is Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
