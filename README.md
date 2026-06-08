@@ -1,0 +1,136 @@
+# Sashité Sanki Arbiter
+
+[![Crates.io](https://img.shields.io/crates/v/sashite-sanki-arbiter.svg)](https://crates.io/crates/sashite-sanki-arbiter)
+[![Docs.rs](https://docs.rs/sashite-sanki-arbiter/badge.svg)](https://docs.rs/sashite-sanki-arbiter)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+Adjudication logic for the **Sanki** game suite, built for
+[Sashité](https://sashite.com/). The L2 layer over
+[`sashite-sanki-engine`](https://github.com/sashite/sanki-engine.rs): it rules on
+a session from its public events and emits a binding verdict. Published under the
+Apache-2.0 license.
+
+The event model is **abstract** and carries **no Nostr dependency**: the same
+adjudication logic can be driven from any context able to supply the events — a
+Nostr relay or service, a server backend, or even a client. Identity, transport,
+and signature verification are the caller's responsibility.
+
+## Event model
+
+The arbiter reasons over plain values the caller has already received,
+signature-verified, and parsed — there is no cryptography and no I/O here:
+
+- `Ply` — a move played at a step (the kind-6423 content);
+- `Attestation` — a timestamper's attestation of an event (kind 1041);
+- `AdjudicationRequest` — a request to rule on a session (kind 6424);
+- `EventId` / `PublicKey` — opaque 32-byte identities.
+
+All timing is anchored on the timestamper's attestations, never on an event's own
+declarative `created_at`.
+
+## Adjudication
+
+`adjudicate(params, plies, attestations, request) -> Option<Adjudication>` rules
+on a session, cut off at the triggering Request's canonical attestation:
+
+- **race resolution** selects, for each slot, the canonical ply (smallest
+  attestation time, then smallest event id);
+- the **natural state** is the longest consecutive canonical chain from step 1;
+- **commitment violations** (equivocation, step-ownership) and **implicit
+  terminations** (resignation, draw by agreement) are detected;
+- the resulting termination causes are ranked by **attestation time**, and the
+  earliest one rules.
+
+`adjudicate` returns `None` when no ruling is possible (the Request is not yet
+attested, or the invocation is premature).
+
+## Design guarantees
+
+- **Panic-free by construction.** Crate lints forbid `unsafe`, and deny
+  `unwrap`/`expect`/`panic`, slice indexing, and overflowing arithmetic.
+- **Deterministic.** The verdict is a pure function of the events; identity,
+  transport, and signature verification are the caller's responsibility.
+
+## Usage
+
+```toml
+[dependencies]
+sashite-sanki-arbiter = "0.1"
+```
+
+```rust
+use sashite_sanki_arbiter::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
+use sashite_sanki_arbiter::session::SessionParams;
+use sashite_sanki_arbiter::verdict::adjudicate;
+use sashite_sanki_engine::domain::side::Side;
+use sashite_sanki_engine::domain::status::{Outcome3, Status};
+use sashite_sanki_engine::domain::time::{Duration, Timestamp};
+use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
+use sashite_sanki_engine::position::Position;
+
+// Identities (opaque 32-byte values; the caller maps them from its own source).
+let session = EventId::from_bytes([50; 32]);
+let arbiter = PublicKey::from_bytes([2; 32]);
+let timestamper = PublicKey::from_bytes([99; 32]);
+let first = PublicKey::from_bytes([10; 32]);
+let second = PublicKey::from_bytes([20; 32]);
+
+// The session's invariant parameters, including the initial position (FEEN).
+let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
+let params = SessionParams::new(
+    session,
+    arbiter,
+    timestamper,
+    first,
+    second,
+    TimeControl::new(period, Vec::new()),
+    Position::parse("7k^/6pp/8/8/8/8/8/R3K^3 / W/w").expect("valid FEEN"),
+    Timestamp::from_unix(0),
+);
+
+// One ply: the first player plays Ra1-a8, a back-rank mate.
+let plies = [Ply::new(
+    EventId::from_bytes([1; 32]),
+    first,
+    session,
+    1,
+    false,
+    r#"["a1","a8",null]"#.to_owned(),
+)];
+
+// The second player requests adjudication; the timestamper has attested both the
+// ply (t=100) and the request (t=1000, the cutoff).
+let request = AdjudicationRequest::new(EventId::from_bytes([170; 32]), second, session, arbiter);
+let attestations = [
+    Attestation::new(
+        EventId::from_bytes([101; 32]),
+        timestamper,
+        EventId::from_bytes([1; 32]),
+        Timestamp::from_unix(100),
+    ),
+    Attestation::new(
+        EventId::from_bytes([171; 32]),
+        timestamper,
+        EventId::from_bytes([170; 32]),
+        Timestamp::from_unix(1000),
+    ),
+];
+
+let adjudication = adjudicate(&params, &plies, &attestations, &request).expect("a ruling");
+assert_eq!(adjudication.status(), Status::Checkmate);
+assert_eq!(adjudication.result(), Outcome3::FirstWins);
+assert_eq!(adjudication.score(Side::First), 100);
+```
+
+## Built on
+
+[`sashite-sanki-engine`](https://github.com/sashite/sanki-engine.rs) (the rules
+engine), which it uses to replay and validate plies.
+
+## Minimum supported Rust version
+
+Rust 1.81.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

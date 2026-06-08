@@ -1,0 +1,25 @@
+[package]
+name = "sashite-sanki-arbiter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "Apache-2.0"
+description = "Adjudication logic for the Sanki game suite over an abstract event model, built for Sashité."
+repository = "https://github.com/sashite/sanki-arbiter.rs"
+homepage = "https://sashite.com/"
+readme = "README.md"
+keywords = ["chess", "ogi", "xiongqi", "board-game", "arbiter"]
+categories = ["games", "game-development"]
+
+[dependencies]
+sashite-sanki-engine = "0.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"

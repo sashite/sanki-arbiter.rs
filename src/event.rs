@@ -1,0 +1,313 @@
+//! Typed Nostr event models the arbiter reasons about.
+//!
+//! The arbiter consumes events that the application has already received,
+//! signature-verified (NIP-01), and parsed from their raw tag form. This module
+//! gives those events a typed shape reduced to what arbitration needs:
+//!
+//! - [`Ply`] (kind `6423`) — a played half-move: its `step`, signer, optional
+//!   `draw` flag, and opaque `content` (decoded later by the kernel);
+//! - [`Attestation`] (kind `1041`) — the designated timestamper's receipt
+//!   witness, carrying the **canonical timing** of the attested event;
+//! - [`AdjudicationRequest`] (kind `6424`) — a player's invocation of the
+//!   arbiter.
+//!
+//! A deliberate omission encodes a protocol invariant in the types: neither
+//! [`Ply`] nor [`AdjudicationRequest`] carries its own `created_at`. A suite
+//! event's `created_at` is the signer's self-claim and MUST NOT drive timing or
+//! race resolution (kind `6423` §Time accounting; kind `6424` §Invocation
+//! timing); the authoritative timing is the [`Attestation`]'s `created_at`.
+//! Leaving the field out of the model makes the misuse unrepresentable.
+//!
+//! Identity is carried by [`EventId`] and [`PublicKey`], 32-byte newtypes over
+//! the canonical Nostr encoding. [`EventId`] is ordered: the byte order is the
+//! "smallest event ID" tiebreak of race resolution.
+
+use sashite_sanki_engine::domain::time::Timestamp;
+
+/// A 32-byte Nostr event identifier.
+///
+/// Ordered by raw bytes, which is the tiebreak used by race resolution
+/// ("smallest event ID").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EventId([u8; 32]);
+
+/// A 32-byte Nostr public key (x-only), the signer identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PublicKey([u8; 32]);
+
+impl EventId {
+    /// Wraps the 32 raw bytes of an event id.
+    #[inline]
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes.
+    #[inline]
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Parses a 64-character lowercase/uppercase hex string, or `None` if it is
+    /// not exactly 64 hex digits.
+    #[inline]
+    #[must_use]
+    pub fn parse(hex: &str) -> Option<Self> {
+        parse_hex32(hex).map(Self)
+    }
+}
+
+impl PublicKey {
+    /// Wraps the 32 raw bytes of a public key.
+    #[inline]
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes.
+    #[inline]
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Parses a 64-character hex string, or `None` if it is not exactly 64 hex
+    /// digits.
+    #[inline]
+    #[must_use]
+    pub fn parse(hex: &str) -> Option<Self> {
+        parse_hex32(hex).map(Self)
+    }
+}
+
+impl core::fmt::Display for EventId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write_hex(f, &self.0)
+    }
+}
+
+impl core::fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write_hex(f, &self.0)
+    }
+}
+
+/// Decodes exactly 32 bytes from a 64-digit hex string.
+fn parse_hex32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0_u8; 32];
+    let mut digits = hex.chars();
+    for byte in bytes.iter_mut() {
+        let high = digits.next()?.to_digit(16)?;
+        let low = digits.next()?.to_digit(16)?;
+        *byte = u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?;
+    }
+    Some(bytes)
+}
+
+/// Writes 32 bytes as lowercase hex.
+fn write_hex(f: &mut core::fmt::Formatter<'_>, bytes: &[u8; 32]) -> core::fmt::Result {
+    for byte in bytes {
+        write!(f, "{byte:02x}")?;
+    }
+    Ok(())
+}
+
+/// A played half-move (kind `6423`).
+///
+/// `content` is the opaque move encoding; its syntax and legality are the
+/// kernel's concern, not this model's. The event's own `created_at` is omitted
+/// by design (see the module documentation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ply {
+    /// The Ply event's id (race-resolution tiebreak).
+    pub id: EventId,
+    /// The moving player's pubkey.
+    pub signer: PublicKey,
+    /// The referenced Game Session (kind `6422`).
+    pub session: EventId,
+    /// The half-move number within the game (`>= 1`).
+    pub step: u32,
+    /// Whether the optional `draw` flag is present.
+    pub draw: bool,
+    /// The played half-move, in the rule system's encoding.
+    pub content: String,
+}
+
+impl Ply {
+    /// Assembles a typed Ply from its arbiter-relevant fields.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        id: EventId,
+        signer: PublicKey,
+        session: EventId,
+        step: u32,
+        draw: bool,
+        content: String,
+    ) -> Self {
+        Self {
+            id,
+            signer,
+            session,
+            step,
+            draw,
+            content,
+        }
+    }
+}
+
+/// An Event Timestamp Attestation (kind `1041`).
+///
+/// Authoritative for timing only when `signer` is the session's designated
+/// timestamper; the arbiter applies that restriction. `created_at` is the
+/// canonical timing the attestation confers on the attested event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attestation {
+    /// The attestation event's id (meta-resolution tiebreak).
+    pub id: EventId,
+    /// The attesting signer (authoritative iff the designated timestamper).
+    pub signer: PublicKey,
+    /// The attested event (a Ply, an Adjudication Request, …).
+    pub attests: EventId,
+    /// The canonical timing conferred on the attested event.
+    pub created_at: Timestamp,
+}
+
+impl Attestation {
+    /// Assembles a typed attestation.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        id: EventId,
+        signer: PublicKey,
+        attests: EventId,
+        created_at: Timestamp,
+    ) -> Self {
+        Self {
+            id,
+            signer,
+            attests,
+            created_at,
+        }
+    }
+}
+
+/// An Adjudication Request (kind `6424`): a player's invocation of the arbiter.
+///
+/// Carries no claims — the arbiter rules on the natural state of events. The
+/// event's own `created_at` is omitted by design; the request's authoritative
+/// timing is its [`Attestation`]'s `created_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdjudicationRequest {
+    /// The request event's id.
+    pub id: EventId,
+    /// The invoking player's pubkey.
+    pub signer: PublicKey,
+    /// The referenced Game Session (kind `6422`).
+    pub session: EventId,
+    /// The designated arbiter named by the request's `p` tag.
+    pub arbiter: PublicKey,
+}
+
+impl AdjudicationRequest {
+    /// Assembles a typed adjudication request.
+    #[inline]
+    #[must_use]
+    pub const fn new(id: EventId, signer: PublicKey, session: EventId, arbiter: PublicKey) -> Self {
+        Self {
+            id,
+            signer,
+            session,
+            arbiter,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
+    use super::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
+    use sashite_sanki_engine::domain::time::Timestamp;
+
+    #[test]
+    fn event_id_hex_round_trip() {
+        let hex = "deadbeef".repeat(8); // 64 characters
+        let id = EventId::parse(&hex).expect("valid hex");
+        assert_eq!(id.to_string(), hex);
+    }
+
+    #[test]
+    fn event_id_ordered_by_bytes() {
+        // The smallest identifier (race-resolution tiebreak).
+        let small = EventId::parse(&"0".repeat(64)).expect("valid hex");
+        let large = EventId::parse(&format!("{}1", "0".repeat(63))).expect("valid hex");
+        assert!(small < large);
+    }
+
+    #[test]
+    fn parse_hex_rejects_invalid_inputs() {
+        assert!(EventId::parse("too short").is_none());
+        assert!(EventId::parse(&"z".repeat(64)).is_none()); // not hexadecimal
+        assert!(PublicKey::parse(&"0".repeat(63)).is_none()); // 63 != 64
+    }
+
+    #[test]
+    fn public_key_equality() {
+        let a = PublicKey::from_bytes([7; 32]);
+        let b = PublicKey::from_bytes([7; 32]);
+        let c = PublicKey::from_bytes([9; 32]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn ply_exposes_its_fields() {
+        let ply = Ply::new(
+            EventId::from_bytes([1; 32]),
+            PublicKey::from_bytes([2; 32]),
+            EventId::from_bytes([3; 32]),
+            7,
+            true,
+            "[\"e2\",\"e4\",null]".to_owned(),
+        );
+        assert_eq!(ply.step, 7);
+        assert!(ply.draw);
+        assert_eq!(ply.signer, PublicKey::from_bytes([2; 32]));
+    }
+
+    #[test]
+    fn attestation_carries_the_canonical_timing() {
+        let attestation = Attestation::new(
+            EventId::from_bytes([1; 32]),
+            PublicKey::from_bytes([2; 32]),
+            EventId::from_bytes([3; 32]),
+            Timestamp::from_unix(1_700_000_000),
+        );
+        assert_eq!(attestation.created_at, Timestamp::from_unix(1_700_000_000));
+        assert_eq!(attestation.attests, EventId::from_bytes([3; 32]));
+    }
+
+    #[test]
+    fn adjudication_request_links_session_and_arbiter() {
+        let request = AdjudicationRequest::new(
+            EventId::from_bytes([1; 32]),
+            PublicKey::from_bytes([2; 32]),
+            EventId::from_bytes([4; 32]),
+            PublicKey::from_bytes([5; 32]),
+        );
+        assert_eq!(request.session, EventId::from_bytes([4; 32]));
+        assert_eq!(request.arbiter, PublicKey::from_bytes([5; 32]));
+    }
+}
