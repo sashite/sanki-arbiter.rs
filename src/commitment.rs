@@ -1,27 +1,38 @@
-//! Player commitment violations (Move Encoding — Sanki; Statuses — Sanki
-//! §Player commitment violations).
+//! Equivocation — the single-content rule (Move Encoding — Sanki §Ply finality
+//! and the single-content rule; Statuses — Sanki §The `illegalmove`
+//! termination §Equivocation).
 //!
-//! Sanki binds players to two commitments, whose breach the arbiter rules
-//! `illegalmove` (decisive `100/0` against the violator):
+//! Each player MUST play at most once per step: one `content` per
+//! `(session, signer, step)` slot, whatever the step's value — already played,
+//! current, or pending. Identical resubmissions are idempotent retries; a
+//! second, *differing* content for a slot is an **equivocation**, ruled
+//! `illegalmove` (decisive `100/0` against the equivocator).
 //!
-//! - **Single-content** — for each `(session, signer, step)` slot, a player must
-//!   commit to one Ply `content`. Identical resubmissions are idempotent retries;
-//!   a second, *differing* content for the slot is a violation.
-//! - **Step ownership** — under strict alternation, side `first` signs the odd
-//!   steps and side `second` the even ones. A Ply signed at a step that is not
-//!   the signer's is a violation (and is also excluded from the natural chain).
+//! The rule applies to **every** slot, including pending ones: a Ply is never
+//! judged for *legality* while pending, but an equivocation is a slot-level
+//! fact, independent of any position, sanctionable as soon as both Plies are
+//! attested within the cutoff window. The sanction is a security property: an
+//! equivocation can never benefit its author positionally (the canonical Ply is
+//! the first attested), so its only uses are hostile — divergent contents
+//! published to trap the opponent, or a withheld earlier-attested content
+//! revealed to rewrite the chain. Anchoring the violation at the
+//! **second-attested** differing Ply makes both attacks self-defeating: the
+//! violation always precedes, in attestation time, any reply it could have
+//! misled.
 //!
 //! Detection is over the natural-state window: only Plies with a canonical
-//! attestation `created_at` ≤ the cutoff count. The **mutual-violation** rule
-//! (Statuses — Sanki) collapses to a single comparison: the loser is the signer
-//! of the *globally earliest* violating Ply — smallest attestation `created_at`,
-//! ties broken by smallest violating-Ply event id. With only one offender, that
-//! offender's earliest violation is trivially the global earliest; with two, the
-//! earlier-attested violation loses.
+//! attestation `created_at` ≤ the cutoff count. The **mutual-equivocation**
+//! rule (Statuses — Sanki §Mutual equivocation) collapses to a single
+//! comparison: the loser is the signer of the *globally earliest* violating
+//! Ply — smallest attestation `created_at`, ties broken by smallest
+//! violating-Ply event id. With one offender, that offender's earliest
+//! violation is trivially the global earliest; with two, the earlier-attested
+//! violation loses.
 //!
-//! When a Ply breaches both commitments (a wrong-step Ply with differing
-//! content), step ownership takes precedence — the wrong step makes the content
-//! moot.
+//! A former second commitment — *step ownership* — disappeared with the
+//! per-player step semantics: the signer is part of the slot, so the
+//! opponent's slots cannot be occupied (Move Encoding — Sanki §Within-step
+//! ordering).
 
 use crate::event::{Attestation, Ply, PublicKey};
 use crate::race_resolution::canonical_attestation;
@@ -30,25 +41,15 @@ use sashite_sanki_engine::domain::side::Side;
 use sashite_sanki_engine::domain::time::Timestamp;
 use std::collections::HashMap;
 
-/// Which commitment a Ply breached.
+/// A ruled equivocation: the losing side and the offending Ply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViolationKind {
-    /// A second, differing `content` for a `(session, signer, step)` slot.
-    SingleContent,
-    /// A Ply signed at a step that is not the signer's under strict alternation.
-    StepOwnership,
-}
-
-/// A ruled commitment violation: the losing side and the offending Ply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Violation<'a> {
+pub struct Equivocation<'a> {
     /// The side ruled against (`illegalmove`, decisive `100/0`).
     pub loser: Side,
-    /// Which commitment was breached.
-    pub kind: ViolationKind,
-    /// The offending Ply.
+    /// The offending Ply (the differing content for an occupied slot).
     pub ply: &'a Ply,
-    /// The offending Ply's canonical attestation `created_at`.
+    /// The offending Ply's canonical attestation `created_at` — the
+    /// violation's anchor for verdict resolution.
     pub at: Timestamp,
 }
 
@@ -59,19 +60,19 @@ struct Active<'a> {
     at: Timestamp,
 }
 
-/// The ruling commitment violation in the session, if any, evaluated within the
+/// The ruling equivocation in the session, if any, evaluated within the
 /// natural-state window bounded by `cutoff` (the triggering Request's canonical
 /// attestation `created_at`).
 ///
-/// Returns the losing side per the mutual-violation rule, or `None` if no player
-/// breached a commitment within the window.
+/// Returns the losing side per the mutual-equivocation rule, or `None` if no
+/// player equivocated within the window.
 #[must_use]
-pub fn commitment_violation<'a>(
+pub fn equivocation<'a>(
     params: &SessionParams,
     plies: &'a [Ply],
     attestations: &'a [Attestation],
     cutoff: Timestamp,
-) -> Option<Violation<'a>> {
+) -> Option<Equivocation<'a>> {
     let timestamper = params.timestamper();
     let session = params.session();
 
@@ -85,7 +86,7 @@ pub fn commitment_violation<'a>(
         })
         .collect();
 
-    // The committed (earliest) Ply of each (signer, step) slot.
+    // The committed (earliest-attested) Ply of each (signer, step) slot.
     let mut slot_first: HashMap<(PublicKey, u32), Active<'a>> = HashMap::new();
     for entry in &active {
         slot_first
@@ -98,22 +99,19 @@ pub fn commitment_violation<'a>(
             .or_insert(*entry);
     }
 
-    // Classify each active Ply; step ownership takes precedence over content.
-    let mut violations: Vec<Violation<'a>> = Vec::new();
+    // Every active Ply whose content differs from its slot's committed content
+    // is a violation; identical resubmissions are idempotent retries.
+    let mut violations: Vec<Equivocation<'a>> = Vec::new();
     for entry in &active {
-        let kind = if entry.ply.signer != params.expected_signer(entry.ply.step) {
-            Some(ViolationKind::StepOwnership)
-        } else if let Some(first) = slot_first.get(&(entry.ply.signer, entry.ply.step)) {
-            (entry.ply.id != first.ply.id && entry.ply.content != first.ply.content)
-                .then_some(ViolationKind::SingleContent)
-        } else {
-            None
+        let Some(first) = slot_first.get(&(entry.ply.signer, entry.ply.step)) else {
+            continue;
         };
-
-        if let (Some(kind), Some(loser)) = (kind, params.side_of(entry.ply.signer)) {
-            violations.push(Violation {
+        if entry.ply.id == first.ply.id || entry.ply.content == first.ply.content {
+            continue;
+        }
+        if let Some(loser) = params.side_of(entry.ply.signer) {
+            violations.push(Equivocation {
                 loser,
-                kind,
                 ply: entry.ply,
                 at: entry.at,
             });
@@ -135,7 +133,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::{commitment_violation, ViolationKind};
+    use super::equivocation;
     use crate::event::{Attestation, EventId, Ply, PublicKey};
     use crate::session::SessionParams;
     use sashite_sanki_engine::domain::side::Side;
@@ -190,14 +188,15 @@ mod tests {
     }
 
     #[test]
-    fn violation_single_content() {
-        // Same slot (first, step 1), two differing contents: violation.
+    fn differing_content_is_an_equivocation() {
+        // Same slot (first, step 1), two differing contents: violation, anchored
+        // at the second-attested content.
         let plies = [ply(1, FIRST, 1, "A"), ply(2, FIRST, 1, "B")];
         let atts = [att(101, 1, 100), att(102, 2, 200)];
-        let v = commitment_violation(&params(), &plies, &atts, ts(1000)).expect("violation");
+        let v = equivocation(&params(), &plies, &atts, ts(1000)).expect("violation");
         assert_eq!(v.loser, Side::First);
-        assert_eq!(v.kind, ViolationKind::SingleContent);
         assert_eq!(*v.ply.id.as_bytes(), [2; 32]); // the second, divergent content
+        assert_eq!(v.at, ts(200));
     }
 
     #[test]
@@ -205,24 +204,29 @@ mod tests {
         // Same content twice: idempotent retry, no violation.
         let plies = [ply(1, FIRST, 1, "A"), ply(2, FIRST, 1, "A")];
         let atts = [att(101, 1, 100), att(102, 2, 200)];
-        assert!(commitment_violation(&params(), &plies, &atts, ts(1000)).is_none());
+        assert!(equivocation(&params(), &plies, &atts, ts(1000)).is_none());
     }
 
     #[test]
-    fn violation_step_ownership() {
-        // `second` signs step 1 (expected: `first`).
-        let plies = [ply(1, SECOND, 1, "A")];
-        let atts = [att(101, 1, 100)];
-        let v = commitment_violation(&params(), &plies, &atts, ts(1000)).expect("violation");
-        assert_eq!(v.loser, Side::Second);
-        assert_eq!(v.kind, ViolationKind::StepOwnership);
+    fn distinct_slots_do_not_violate() {
+        // Different steps and different signers: every slot holds one content.
+        let plies = [
+            ply(1, FIRST, 1, "A"),
+            ply(2, SECOND, 1, "B"),
+            ply(3, FIRST, 2, "C"),
+        ];
+        let atts = [att(101, 1, 100), att(102, 2, 200), att(103, 3, 300)];
+        assert!(equivocation(&params(), &plies, &atts, ts(1000)).is_none());
     }
 
     #[test]
-    fn proper_alternation_does_not_violate() {
-        let plies = [ply(1, FIRST, 1, "A"), ply(2, SECOND, 2, "B")];
+    fn pending_slot_equivocation_counts() {
+        // The slot (first, step 5) is far beyond the play order, yet two
+        // differing contents for it are an equivocation all the same.
+        let plies = [ply(1, FIRST, 5, "A"), ply(2, FIRST, 5, "B")];
         let atts = [att(101, 1, 100), att(102, 2, 200)];
-        assert!(commitment_violation(&params(), &plies, &atts, ts(1000)).is_none());
+        let v = equivocation(&params(), &plies, &atts, ts(1000)).expect("violation");
+        assert_eq!(v.loser, Side::First);
     }
 
     #[test]
@@ -230,7 +234,7 @@ mod tests {
         // The divergent content is attested after the cutoff: excluded.
         let plies = [ply(1, FIRST, 1, "A"), ply(2, FIRST, 1, "B")];
         let atts = [att(101, 1, 100), att(102, 2, 2000)];
-        assert!(commitment_violation(&params(), &plies, &atts, ts(1000)).is_none());
+        assert!(equivocation(&params(), &plies, &atts, ts(1000)).is_none());
     }
 
     #[test]
@@ -238,22 +242,28 @@ mod tests {
         // The divergent content is not attested: pending, excluded.
         let plies = [ply(1, FIRST, 1, "A"), ply(2, FIRST, 1, "B")];
         let atts = [att(101, 1, 100)];
-        assert!(commitment_violation(&params(), &plies, &atts, ts(1000)).is_none());
+        assert!(equivocation(&params(), &plies, &atts, ts(1000)).is_none());
     }
 
     #[test]
-    fn mutual_violations_earliest_loses() {
-        // First violates single-content (ply 2, attested at 300);
-        // Second violates step-ownership (ply 3, attested at 200, earlier).
+    fn mutual_equivocations_earliest_loses() {
+        // First equivocates at 300; Second equivocates at 200 (earlier): the
+        // earlier-attested violation loses.
         let plies = [
             ply(1, FIRST, 1, "A"),
             ply(2, FIRST, 1, "B"),
             ply(3, SECOND, 1, "X"),
+            ply(4, SECOND, 1, "Y"),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 300), att(103, 3, 200)];
-        let v = commitment_violation(&params(), &plies, &atts, ts(1000)).expect("violation");
+        let atts = [
+            att(101, 1, 100),
+            att(102, 2, 300),
+            att(103, 3, 150),
+            att(104, 4, 200),
+        ];
+        let v = equivocation(&params(), &plies, &atts, ts(1000)).expect("violation");
         assert_eq!(v.loser, Side::Second); // earliest violation (200)
-        assert_eq!(*v.ply.id.as_bytes(), [3; 32]);
+        assert_eq!(*v.ply.id.as_bytes(), [4; 32]);
     }
 
     #[test]
@@ -261,6 +271,6 @@ mod tests {
         // Signer pk(77): not a player of the session.
         let plies = [ply(1, 77, 1, "A"), ply(2, 77, 1, "B")];
         let atts = [att(101, 1, 100), att(102, 2, 200)];
-        assert!(commitment_violation(&params(), &plies, &atts, ts(1000)).is_none());
+        assert!(equivocation(&params(), &plies, &atts, ts(1000)).is_none());
     }
 }

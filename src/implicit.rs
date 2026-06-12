@@ -1,31 +1,21 @@
-//! Implicit termination conventions (Statuses — Sanki §Implicit termination).
+//! Implicit draw by agreement (Statuses — Sanki §Implicit draw by agreement).
 //!
-//! Two statuses do not arise from position evaluation but from how a player
-//! invokes the arbiter on the natural state:
+//! A player offers a draw by attaching the `draw` flag to their Ply; the
+//! opponent accepts by invoking the arbiter while that offer is the last
+//! half-move of the chain. Playing the next half-move instead implicitly
+//! declines (the chain extends past the offer, and the condition below fails).
 //!
 //! - **Implicit draw by agreement** — the last Ply in the consecutive chain
 //!   carries the `draw` flag (an offer by its signer), and the triggering
-//!   Adjudication Request is signed by that signer's **opponent**: the invocation
-//!   accepts the offer. Result: `50/50`.
-//! - **Implicit resignation** — it is the invoker's turn at the step following
-//!   the chain (the chain stopped because they have not played it), so invoking
-//!   instead of moving is read as resigning. Result: decisive against the
-//!   invoker.
+//!   Adjudication Request is signed by that signer's **opponent**: the
+//!   invocation accepts the offer. Result: `50/50`.
 //!
-//! The resignation conditions 2 and 3 of the spec are subsumed by the natural
-//! state: the chain stops at step N+1 precisely because no canonical Ply by the
-//! expected signer exists there within the cutoff; when N+1 is the invoker's
-//! turn, that absence *is* condition 3. Hence only the natural state and the
-//! Request are needed.
-//!
-//! **Agreement takes precedence over resignation.** When the last Ply offers a
-//! draw and the opponent invokes, both positional patterns coincide (it is the
-//! opponent's turn), but the draw offer makes the invocation an acceptance, not
-//! an abandonment.
-//!
-//! This function assumes the game is otherwise ongoing: the orchestration
-//! evaluates commitment violations and rule-system terminations first, and only
-//! falls back to the implicit conventions when neither applies.
+//! The other implicit convention — **residual resignation** — needs no
+//! detection of its own: per Statuses — Sanki §Verdict resolution, the
+//! post-chain resolution is ordered `agreement` → abandonment `timeout` →
+//! `resignation`, and resignation is simply the fall-through, decisive against
+//! the invoker, whatever the turn. That ordering lives in [`crate::verdict`];
+//! this module only detects the acceptance.
 
 use crate::event::AdjudicationRequest;
 use crate::natural_state::NaturalState;
@@ -33,40 +23,25 @@ use crate::session::SessionParams;
 use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::status::Status;
 
-/// The implicit verdict for the session, if the invocation matches a convention.
+/// The `agreement` verdict, if the invocation accepts a standing draw offer.
 ///
-/// Returns `agreement` (draw) when the last chain Ply offers a draw and the
-/// Request is signed by its opponent; otherwise `resignation` (decisive against
-/// the invoker) when the step following the chain is the invoker's turn; `None`
-/// when neither convention applies.
+/// Returns `Some(agreement)` when the last chain Ply offers a draw and the
+/// Request is signed by its signer's opponent; `None` otherwise (no offer, an
+/// offer extended past by play, an offerer invoking on their own offer, or a
+/// non-player invoker).
 #[must_use]
-pub fn implicit_termination(
+pub fn draw_acceptance(
     params: &SessionParams,
     natural: &NaturalState<'_>,
     request: &AdjudicationRequest,
 ) -> Option<Verdict> {
     let invoker = params.side_of(request.signer)?;
-
-    // Implicit draw by agreement: the last Ply offers a draw and the invoker is
-    // its opponent (acceptance). Checked first — it overrides resignation when
-    // both positional patterns coincide.
-    if let Some(last) = natural.chain.last() {
-        if last.ply.draw {
-            if let Some(offerer) = params.side_of(last.ply.signer) {
-                if invoker == offerer.flip() {
-                    return Some(Verdict::drawn(Status::Agreement));
-                }
-            }
-        }
+    let last = natural.chain.last()?;
+    if !last.ply.draw {
+        return None;
     }
-
-    // Implicit resignation: the step after the chain is the invoker's turn, and
-    // they invoked instead of playing it.
-    if params.expected_side(natural.next_step()) == invoker {
-        return Some(Verdict::decisive(Status::Resignation, invoker));
-    }
-
-    None
+    let offerer = params.side_of(last.ply.signer)?;
+    (invoker == offerer.flip()).then(|| Verdict::drawn(Status::Agreement))
 }
 
 #[cfg(test)]
@@ -78,13 +53,12 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::implicit_termination;
+    use super::draw_acceptance;
     use crate::event::{AdjudicationRequest, EventId, Ply, PublicKey};
     use crate::natural_state::NaturalState;
     use crate::race_resolution::CanonicalPly;
     use crate::session::SessionParams;
     use sashite_sanki_engine::domain::outcome::Verdict;
-    use sashite_sanki_engine::domain::side::Side;
     use sashite_sanki_engine::domain::status::Status;
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
@@ -129,24 +103,40 @@ mod tests {
     }
 
     #[test]
-    fn resignation_on_empty_chain() {
-        // No move played: it is `first`'s turn (step 1); first invokes.
+    fn agreement_when_opponent_accepts_the_draw() {
+        // Last half-move (first, step 1) marked `draw`; `second` (the opponent)
+        // invokes: acceptance.
+        let p1 = ply(1, FIRST, 1, true);
         let natural = NaturalState {
-            chain: Vec::new(),
+            chain: vec![CanonicalPly {
+                ply: &p1,
+                at: ts(100),
+            }],
             cutoff: ts(1000),
         };
-        let verdict = implicit_termination(&params(), &natural, &request(FIRST));
-        assert_eq!(
-            verdict,
-            Some(Verdict::decisive(Status::Resignation, Side::First))
-        );
+        let verdict = draw_acceptance(&params(), &natural, &request(SECOND));
+        assert_eq!(verdict, Some(Verdict::drawn(Status::Agreement)));
     }
 
     #[test]
-    fn resignation_after_a_few_moves() {
-        // Chain up to step 2; step 3 is `first`'s turn; first invokes.
+    fn no_acceptance_without_a_draw_flag() {
         let p1 = ply(1, FIRST, 1, false);
-        let p2 = ply(2, SECOND, 2, false);
+        let natural = NaturalState {
+            chain: vec![CanonicalPly {
+                ply: &p1,
+                at: ts(100),
+            }],
+            cutoff: ts(1000),
+        };
+        assert!(draw_acceptance(&params(), &natural, &request(SECOND)).is_none());
+    }
+
+    #[test]
+    fn offer_extended_past_by_play_is_declined() {
+        // `first` offers at (first, 1); `second` answers at (second, 1) instead of
+        // invoking: the offer is no longer the last half-move.
+        let p1 = ply(1, FIRST, 1, true);
+        let p2 = ply(2, SECOND, 1, false);
         let natural = NaturalState {
             chain: vec![
                 CanonicalPly {
@@ -160,30 +150,13 @@ mod tests {
             ],
             cutoff: ts(1000),
         };
-        let verdict = implicit_termination(&params(), &natural, &request(FIRST));
-        assert_eq!(
-            verdict,
-            Some(Verdict::decisive(Status::Resignation, Side::First))
-        );
+        assert!(draw_acceptance(&params(), &natural, &request(FIRST)).is_none());
     }
 
     #[test]
-    fn no_resignation_off_the_invoker_turn() {
-        // Chain at step 1; step 2 is `second`'s turn, but `first` invokes.
-        let p1 = ply(1, FIRST, 1, false);
-        let natural = NaturalState {
-            chain: vec![CanonicalPly {
-                ply: &p1,
-                at: ts(100),
-            }],
-            cutoff: ts(1000),
-        };
-        assert!(implicit_termination(&params(), &natural, &request(FIRST)).is_none());
-    }
-
-    #[test]
-    fn agreement_when_opponent_accepts_the_draw() {
-        // Last move (first) marked `draw`; `second` (the opponent) invokes.
+    fn offerer_cannot_accept_their_own_offer() {
+        // `first` offers the draw then invokes: not an acceptance (the residual
+        // resolution in `verdict` decides what the invocation means).
         let p1 = ply(1, FIRST, 1, true);
         let natural = NaturalState {
             chain: vec![CanonicalPly {
@@ -192,63 +165,28 @@ mod tests {
             }],
             cutoff: ts(1000),
         };
-        let verdict = implicit_termination(&params(), &natural, &request(SECOND));
-        assert_eq!(verdict, Some(Verdict::drawn(Status::Agreement)));
+        assert!(draw_acceptance(&params(), &natural, &request(FIRST)).is_none());
     }
 
     #[test]
-    fn agreement_outranks_resignation() {
-        // Same positional configuration, but without the `draw` flag: it is a
-        // resignation by `second` (their turn at step 2) — and with the flag, it is
-        // an agreement. We check both.
-        let without = ply(1, FIRST, 1, false);
-        let natural_without = NaturalState {
-            chain: vec![CanonicalPly {
-                ply: &without,
-                at: ts(100),
-            }],
-            cutoff: ts(1000),
-        };
-        assert_eq!(
-            implicit_termination(&params(), &natural_without, &request(SECOND)),
-            Some(Verdict::decisive(Status::Resignation, Side::Second))
-        );
-
-        let with = ply(1, FIRST, 1, true);
-        let natural_with = NaturalState {
-            chain: vec![CanonicalPly {
-                ply: &with,
-                at: ts(100),
-            }],
-            cutoff: ts(1000),
-        };
-        assert_eq!(
-            implicit_termination(&params(), &natural_with, &request(SECOND)),
-            Some(Verdict::drawn(Status::Agreement))
-        );
-    }
-
-    #[test]
-    fn draw_offer_by_the_offerer_itself_does_not_terminate() {
-        // `first` offers the draw then invokes itself: neither agreement (it is not
-        // the opponent) nor resignation (step 2 is `second`'s turn).
-        let p1 = ply(1, FIRST, 1, true);
-        let natural = NaturalState {
-            chain: vec![CanonicalPly {
-                ply: &p1,
-                at: ts(100),
-            }],
-            cutoff: ts(1000),
-        };
-        assert!(implicit_termination(&params(), &natural, &request(FIRST)).is_none());
-    }
-
-    #[test]
-    fn non_player_invoker_does_not_terminate() {
+    fn empty_chain_has_no_offer() {
         let natural = NaturalState {
             chain: Vec::new(),
             cutoff: ts(1000),
         };
-        assert!(implicit_termination(&params(), &natural, &request(77)).is_none());
+        assert!(draw_acceptance(&params(), &natural, &request(SECOND)).is_none());
+    }
+
+    #[test]
+    fn non_player_invoker_does_not_accept() {
+        let p1 = ply(1, FIRST, 1, true);
+        let natural = NaturalState {
+            chain: vec![CanonicalPly {
+                ply: &p1,
+                at: ts(100),
+            }],
+            cutoff: ts(1000),
+        };
+        assert!(draw_acceptance(&params(), &natural, &request(77)).is_none());
     }
 }

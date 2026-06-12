@@ -1,21 +1,24 @@
 //! The natural state of events at adjudication (kind `6425` §Natural state).
 //!
 //! When the arbiter rules, it rules on the **longest consecutive chain of
-//! Plies** starting from step 1, where each step's Ply:
+//! Plies** following the session's play order from its first half-move, where
+//! the Ply at each position:
 //!
-//! 1. is canonical for its slot (race resolution);
-//! 2. is signed by the signer the rule system expects at that step (Sanki's
-//!    strict alternation, [`SessionParams::expected_signer`]);
+//! 1. occupies the next slot in the play order — `(signer, step)`, the `step`
+//!    being the signer's own move ordinal, interleaved by Sanki's strict
+//!    alternation ([`SessionParams::side_at`] / [`SessionParams::step_at`]);
+//! 2. is canonical for its slot (race resolution);
 //! 3. has a canonical attestation `created_at` **≤** the triggering Adjudication
 //!    Request's canonical attestation `created_at` (the *cutoff*).
 //!
-//! The chain stops at the first step with no Ply satisfying all three. Because
-//! the canonical Ply of a slot is the one with the smallest attestation
+//! The chain stops at the first position with no Ply satisfying all three.
+//! Because the canonical Ply of a slot is the one with the smallest attestation
 //! `created_at`, testing that single canonical Ply against the cutoff is
 //! sufficient: if even it was attested after the Request, every other candidate
-//! for the slot was too. A Ply signed by an unexpected signer forms a different
-//! slot and simply is not a candidate for that step — it neither contributes to
-//! nor disrupts the chain. Plies attested after the cutoff are excluded, so a
+//! for the slot was too. **No slot can be usurped** — the signer is part of the
+//! slot — so a player's extra Plies neither contribute to nor disrupt the
+//! opponent's progression, and a Ply for a slot the order has not yet reached
+//! (a premove) simply waits. Plies attested after the cutoff are excluded, so a
 //! player cannot race the arbiter by playing after invoking.
 //!
 //! If the Request is not yet canonically attested, the cutoff is undefined and
@@ -31,18 +34,20 @@ use sashite_sanki_engine::domain::time::Timestamp;
 /// computed against.
 #[derive(Debug, Clone)]
 pub struct NaturalState<'a> {
-    /// The consecutive canonical Plies, `chain[i]` being the Ply of step `i + 1`.
+    /// The consecutive canonical Plies, `chain[i]` being the Ply at play-order
+    /// position `i + 1`.
     pub chain: Vec<CanonicalPly<'a>>,
     /// The cutoff: the triggering Request's canonical attestation `created_at`.
     pub cutoff: Timestamp,
 }
 
 impl NaturalState<'_> {
-    /// The first step **not** in the chain — the step a continuation would
-    /// occupy. With a chain of `k` plies (steps `1..=k`), this is `k + 1`.
+    /// The first play-order position **not** in the chain — the position a
+    /// continuation would occupy. With a chain of `k` half-moves, this is
+    /// `k + 1`.
     #[inline]
     #[must_use]
-    pub fn next_step(&self) -> u32 {
+    pub fn next_half_move(&self) -> u32 {
         let played = u32::try_from(self.chain.len()).unwrap_or(u32::MAX);
         played.saturating_add(1)
     }
@@ -74,20 +79,21 @@ pub fn natural_state<'a>(
     let cutoff = canonical_attestation(attestations, request.id, timestamper)?.created_at;
 
     let mut chain = Vec::new();
-    let mut step: u32 = 1;
+    let mut half_move: u32 = 1;
     loop {
-        let signer = params.expected_signer(step);
+        let signer = params.player_at(half_move);
+        let step = params.step_at(half_move);
         let candidates = plies
             .iter()
             .filter(|ply| ply.session == session && ply.signer == signer && ply.step == step);
 
         match canonical_ply(candidates, attestations, timestamper) {
-            // Canonical, expected signer, and attested at or before the cutoff.
+            // Canonical for the next slot, attested at or before the cutoff.
             Some(canonical) if canonical.at <= cutoff => {
                 chain.push(canonical);
-                step = step.saturating_add(1);
+                half_move = half_move.saturating_add(1);
             }
-            // No qualifying Ply for this step: the chain ends here.
+            // No qualifying Ply for this position: the chain ends here.
             _ => break,
         }
     }
@@ -169,7 +175,8 @@ mod tests {
 
     #[test]
     fn complete_consecutive_chain() {
-        let plies = [ply(1, FIRST, 1), ply(2, SECOND, 2), ply(3, FIRST, 3)];
+        // Interleaved play order: (first, step 1), (second, step 1), (first, step 2).
+        let plies = [ply(1, FIRST, 1), ply(2, SECOND, 1), ply(3, FIRST, 2)];
         let atts = [
             att(101, 1, 100),
             att(102, 2, 200),
@@ -178,7 +185,7 @@ mod tests {
         ];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
         assert_eq!(ns.chain.len(), 3);
-        assert_eq!(ns.next_step(), 4);
+        assert_eq!(ns.next_half_move(), 4);
         assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
         assert_eq!(*ns.chain[2].ply.id.as_bytes(), [3; 32]);
     }
@@ -194,8 +201,9 @@ mod tests {
 
     #[test]
     fn cutoff_excludes_a_later_ply() {
-        // step 3 attested after the cutoff: excluded, the chain stops at 2.
-        let plies = [ply(1, FIRST, 1), ply(2, SECOND, 2), ply(3, FIRST, 3)];
+        // Position 3 (first, step 2) attested after the cutoff: excluded, the
+        // chain stops at 2.
+        let plies = [ply(1, FIRST, 1), ply(2, SECOND, 1), ply(3, FIRST, 2)];
         let atts = [
             att(101, 1, 100),
             att(102, 2, 200),
@@ -204,13 +212,14 @@ mod tests {
         ];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
         assert_eq!(ns.chain.len(), 2);
-        assert_eq!(ns.next_step(), 3);
+        assert_eq!(ns.next_half_move(), 3);
     }
 
     #[test]
-    fn unexpected_signer_breaks_the_chain() {
-        // step 2 signed by `first` while `second` is expected: no candidate for the
-        // expected slot, the chain stops at 1.
+    fn opponent_slot_cannot_be_filled() {
+        // `first` premoves their own step 2 while `second` never plays step 1:
+        // position 2 expects (second, step 1) — `first`'s extra Ply is a
+        // future-slot Ply and cannot fill it. The chain stops at 1.
         let plies = [ply(1, FIRST, 1), ply(2, FIRST, 2)];
         let atts = [att(101, 1, 100), att(102, 2, 200), cutoff_att(1000)];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
@@ -219,22 +228,39 @@ mod tests {
 
     #[test]
     fn pending_ply_breaks_the_chain() {
-        // step 2 present but not attested: pending, excluded → chain of 1.
-        let plies = [ply(1, FIRST, 1), ply(2, SECOND, 2)];
+        // (second, step 1) present but not attested: pending, excluded → chain of 1.
+        let plies = [ply(1, FIRST, 1), ply(2, SECOND, 1)];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
         assert_eq!(ns.chain.len(), 1);
     }
 
     #[test]
-    fn gap_in_steps_stops_the_chain() {
-        // Only step 1 exists: chain of length 1, next step 2.
+    fn gap_in_play_order_stops_the_chain() {
+        // Only (first, step 1) exists: chain of length 1, next position 2.
         let plies = [ply(1, FIRST, 1)];
         let atts = [att(101, 1, 100), cutoff_att(1000)];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
         assert_eq!(ns.chain.len(), 1);
-        assert_eq!(ns.next_step(), 2);
+        assert_eq!(ns.next_half_move(), 2);
         assert!(!ns.is_empty());
+    }
+
+    #[test]
+    fn deep_premove_activates_by_chain_progression() {
+        // `first` publishes steps 1 and 2 up front (a premove burst); `second`
+        // answers their step 1. The interleaved chain consumes all three:
+        // (first, 1), (second, 1), (first, 2).
+        let plies = [ply(1, FIRST, 1), ply(3, FIRST, 2), ply(2, SECOND, 1)];
+        let atts = [
+            att(101, 1, 100),
+            att(103, 3, 110), // premove attested before second's reply
+            att(102, 2, 200),
+            cutoff_att(1000),
+        ];
+        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        assert_eq!(ns.chain.len(), 3);
+        assert_eq!(*ns.chain[2].ply.id.as_bytes(), [3; 32]);
     }
 
     #[test]
@@ -251,6 +277,6 @@ mod tests {
         let atts = [cutoff_att(1000)];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
         assert!(ns.is_empty());
-        assert_eq!(ns.next_step(), 1);
+        assert_eq!(ns.next_half_move(), 1);
     }
 }

@@ -33,16 +33,24 @@ declarative `created_at`.
 `adjudicate(params, plies, attestations, request) -> Option<Adjudication>` rules
 on a session, cut off at the triggering Request's canonical attestation:
 
-- **race resolution** selects, for each slot, the canonical ply (smallest
-  attestation time, then smallest event id);
-- the **natural state** is the longest consecutive canonical chain from step 1;
-- **commitment violations** (equivocation, step-ownership) and **implicit
-  terminations** (resignation, draw by agreement) are detected;
-- the resulting termination causes are ranked by **attestation time**, and the
-  earliest one rules.
+- **race resolution** selects, for each `(session, signer, step)` slot, the
+  canonical ply (smallest attestation time, then smallest event id) — `step`
+  being each signer's own move ordinal;
+- the **natural state** is the longest consecutive canonical chain following
+  the interleaved play order (within each step value, side `first` before side
+  `second`);
+- two candidate families are ranked by **attestation time** — the earliest
+  cause rules, an **equivocation** (a second, differing content for a slot)
+  winning an exact tie — the other family being the **play-derived**
+  termination: chain replay (illegal evaluated ply, rule-system ending,
+  played-ply timeout), then, on a still-ongoing position, the invocation
+  resolved in order: draw acceptance, abandonment timeout, **residual
+  resignation** (decisive against the invoker, whatever the turn).
 
-`adjudicate` returns `None` when no ruling is possible (the Request is not yet
-attested, or the invocation is premature).
+`adjudicate` returns `None` only when the Request is not yet canonically
+attested, or its signer is not a session player. Selecting **which** Request to
+rule on is the caller's concern: Sashité's arbiter rules on the earliest
+canonically attested conforming Request not yet adjudicated.
 
 ## Design guarantees
 

@@ -14,7 +14,9 @@
 //!
 //! This module is a pure aggregate plus the lookups the arbiter layers need:
 //! mapping a signer to its side, naming the player on a side, recognizing the
-//! timestamper, and computing the expected signer of a step under Sanki's strict
+//! timestamper, and mapping a **play-order position** (1-based half-move index)
+//! to its slot — the side on move and that side's `step` (the signer's own move
+//! ordinal, kind `6423` §Step semantics and play order) — under Sanki's strict
 //! alternation. The per-player variants are not duplicated here — they are read
 //! from the [`Position`] (its style field), via [`SessionParams::initial_state`]
 //! and the kernel.
@@ -149,24 +151,35 @@ impl SessionParams {
         pubkey == self.timestamper
     }
 
-    /// The side expected to sign the given 1-based step, under Sanki's strict
-    /// alternation: side `first` plays the odd steps, side `second` the even
-    /// ones.
+    /// The side on move at the 1-based position `half_move` of the play order,
+    /// under Sanki's strict alternation: within each step value, side `first`
+    /// moves before side `second` — so odd positions belong to `first`, even
+    /// ones to `second`.
     #[inline]
     #[must_use]
-    pub const fn expected_side(&self, step: u32) -> Side {
-        if step & 1 == 1 {
+    pub const fn side_at(&self, half_move: u32) -> Side {
+        if half_move & 1 == 1 {
             Side::First
         } else {
             Side::Second
         }
     }
 
-    /// The player expected to sign the given 1-based step.
+    /// The mover's `step` — their own move ordinal (kind `6423` §Step semantics
+    /// and play order) — at the 1-based position `half_move` of the play order:
+    /// position 1 → step 1 of `first`, position 2 → step 1 of `second`,
+    /// position 3 → step 2 of `first`, …
     #[inline]
     #[must_use]
-    pub const fn expected_signer(&self, step: u32) -> PublicKey {
-        self.player(self.expected_side(step))
+    pub const fn step_at(&self, half_move: u32) -> u32 {
+        half_move.div_ceil(2)
+    }
+
+    /// The player on move at the 1-based position `half_move` of the play order.
+    #[inline]
+    #[must_use]
+    pub const fn player_at(&self, half_move: u32) -> PublicKey {
+        self.player(self.side_at(half_move))
     }
 
     /// Builds the initial kernel state: clocks started from the time control, the
@@ -253,15 +266,21 @@ mod tests {
     }
 
     #[test]
-    fn expected_signer_by_step_parity() {
+    fn play_order_positions_map_to_slots() {
         let p = params();
-        // Strict alternation: odd → first, even → second.
-        assert_eq!(p.expected_side(1), Side::First);
-        assert_eq!(p.expected_side(2), Side::Second);
-        assert_eq!(p.expected_side(3), Side::First);
-        assert_eq!(p.expected_side(4), Side::Second);
-        assert_eq!(p.expected_signer(1), pk(10));
-        assert_eq!(p.expected_signer(2), pk(20));
+        // Strict alternation: (1,first),(1,second),(2,first),(2,second), …
+        assert_eq!(p.side_at(1), Side::First);
+        assert_eq!(p.side_at(2), Side::Second);
+        assert_eq!(p.side_at(3), Side::First);
+        assert_eq!(p.side_at(4), Side::Second);
+        assert_eq!(p.step_at(1), 1);
+        assert_eq!(p.step_at(2), 1);
+        assert_eq!(p.step_at(3), 2);
+        assert_eq!(p.step_at(4), 2);
+        assert_eq!(p.step_at(5), 3);
+        assert_eq!(p.player_at(1), pk(10));
+        assert_eq!(p.player_at(2), pk(20));
+        assert_eq!(p.player_at(3), pk(10));
     }
 
     #[test]

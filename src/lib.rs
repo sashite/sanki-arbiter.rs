@@ -3,7 +3,7 @@
 //!
 //! The L2 layer over the `sashite-sanki-engine` crate: it rules on a session from
 //! its attested event chain and emits the Adjudication —
-//! `adjudicate(session, attested_chain, request) -> Adjudication`.
+//! `adjudicate(params, plies, attestations, request) -> Option<Adjudication>`.
 //!
 //! The event model is **abstract** and carries no Nostr dependency: `Ply`,
 //! `Attestation`, and `AdjudicationRequest` are plain values the caller has

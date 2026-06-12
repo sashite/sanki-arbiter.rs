@@ -131,7 +131,9 @@ pub struct Ply {
     pub signer: PublicKey,
     /// The referenced Game Session (kind `6422`).
     pub session: EventId,
-    /// The half-move number within the game (`>= 1`).
+    /// The signer's own move ordinal (`>= 1`), per kind `6423` §Step semantics
+    /// and play order: each player numbers their own moves independently, and
+    /// the slot of a Ply is `(session, signer, step)`.
     pub step: u32,
     /// Whether the optional `draw` flag is present.
     pub draw: bool,
