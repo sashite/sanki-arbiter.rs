@@ -287,7 +287,7 @@ mod tests {
     fn initial_kernel_state() {
         let p = params();
         let state = p.initial_state();
-        assert_eq!(state.step(), 1);
+        assert_eq!(state.half_move(), 1);
         assert_eq!(state.last_attestation(), Timestamp::from_unix(1000));
         assert_eq!(state.position().to_feen(), START_FEEN);
         assert!(!state.move_limit_reached());
