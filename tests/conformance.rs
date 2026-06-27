@@ -1,12 +1,18 @@
-//! Shared conformance vectors — selection (ADR-0002 forgiving premoves).
+//! Shared conformance vectors — selection and full-session scenarios (ADR-0002).
 //!
-//! Drives `tests/conformance/selection.json` (a vendored copy of the shared corpus
-//! at `web-specs.md/nostr/conformance`) through the arbiter's pure selection
-//! primitive [`select_candidate`]. Each candidate carries its own `legal` (a given,
-//! established by category A — legality — in the engine crate), so these vectors
-//! pin only the *selection algorithm*: anteriority, the first-legal choice, and the
-//! `K = 1` anterior cap. The TypeScript client runs the same JSON, so the arbiter
-//! and the client cannot drift on which Ply is canonical.
+//! Two vendored corpora (copies of the shared set at `web-specs.md/nostr/conformance`):
+//!
+//! - `selection.json` — the pure per-slot rule, driven through [`select_candidate`].
+//!   Each candidate carries its own `legal` (a given), so it pins only the
+//!   *selection algorithm*: anteriority, the first-legal choice, the `K = 1` cap.
+//! - `scenarios.json` — full sessions, driven through [`natural_state`]: a founding
+//!   position, plies with their canonical-attestation timings, and a cutoff. The
+//!   asserted **selected chain** is the consensus property — the TypeScript client
+//!   replays the same `scenarios.json` through `forgivingPlyChain` and must select
+//!   the same chain, so the arbiter cannot finalise a chain the client would not.
+//!
+//! The TypeScript client runs both files, so the two implementations cannot drift on
+//! which Ply is canonical.
 
 #![allow(
     clippy::unwrap_used,
@@ -18,8 +24,13 @@
 
 use std::path::PathBuf;
 
+use sashite_sanki_arbiter::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
+use sashite_sanki_arbiter::natural_state::natural_state;
 use sashite_sanki_arbiter::selection::{select_candidate, Candidate, Selection};
-use sashite_sanki_engine::domain::time::Timestamp;
+use sashite_sanki_arbiter::session::SessionParams;
+use sashite_sanki_engine::domain::time::{Duration, Timestamp};
+use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
+use sashite_sanki_engine::position::Position;
 
 #[derive(serde::Deserialize)]
 struct Corpus {
@@ -100,6 +111,144 @@ fn selection_conformance() {
             selected, vector.expected.selected,
             "vector {}: selected candidate mismatch",
             vector.id
+        );
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioCorpus {
+    vectors: Vec<ScenarioVector>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioVector {
+    id: String,
+    position: String,
+    t0: i64,
+    cutoff: i64,
+    plies: Vec<ScenarioPly>,
+    #[serde(rename = "expectedChain")]
+    expected_chain: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioPly {
+    id: String,
+    seat: String,
+    step: u32,
+    #[serde(rename = "move")]
+    mv: serde_json::Value,
+    #[serde(rename = "attestedAt")]
+    attested_at: i64,
+}
+
+const FIRST: u8 = 10;
+const SECOND: u8 = 20;
+const TIMESTAMPER: u8 = 99;
+const ARBITER: u8 = 2;
+
+fn pk(byte: u8) -> PublicKey {
+    PublicKey::from_bytes([byte; 32])
+}
+
+/// Pack a short ASCII id into a 32-byte EventId (zero-padded). Injective for the
+/// distinct ASCII ids the corpus uses, and reversible by [`str_from_eid`] — the
+/// scenarios avoid `created_at` ties, so the resulting byte order never affects
+/// selection (which would otherwise need to match the TS lexicographic tiebreak).
+fn eid_from_str(s: &str) -> EventId {
+    let mut bytes = [0_u8; 32];
+    for (i, b) in s.bytes().take(32).enumerate() {
+        bytes[i] = b;
+    }
+    EventId::from_bytes(bytes)
+}
+
+fn str_from_eid(id: &EventId) -> String {
+    let bytes = id.as_bytes();
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// A time control generous enough never to flag, so the chain reflects only the
+/// selection rule (the scenarios pin chain composition, not the clock).
+fn neutral_time_control() -> TimeControl {
+    let period = Period::new(Duration::from_secs(3_600), None, None).expect("valid period");
+    TimeControl::new(period, Vec::new())
+}
+
+#[test]
+fn scenario_conformance() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/conformance/scenarios.json");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        eprintln!(
+            "conformance corpus absent ({}) — test skipped.",
+            path.display()
+        );
+        return;
+    };
+    let corpus: ScenarioCorpus =
+        serde_json::from_str(&contents).expect("conformance/scenarios.json: invalid JSON");
+    assert!(!corpus.vectors.is_empty(), "the corpus has no vectors");
+
+    let session = eid_from_str("session");
+    let request_id = eid_from_str("request");
+
+    for scenario in &corpus.vectors {
+        let params = SessionParams::new(
+            session,
+            pk(ARBITER),
+            pk(TIMESTAMPER),
+            pk(FIRST),
+            pk(SECOND),
+            neutral_time_control(),
+            Position::parse(&scenario.position).expect("valid FEEN"),
+            Timestamp::from_unix(scenario.t0),
+        );
+
+        let plies: Vec<Ply> = scenario
+            .plies
+            .iter()
+            .map(|ply| {
+                let signer = if ply.seat == "first" { FIRST } else { SECOND };
+                let content = serde_json::to_string(&ply.mv).expect("serialize move");
+                Ply::new(eid_from_str(&ply.id), pk(signer), session, ply.step, false, content)
+            })
+            .collect();
+
+        let mut attestations: Vec<Attestation> = scenario
+            .plies
+            .iter()
+            .map(|ply| {
+                Attestation::new(
+                    eid_from_str(&format!("att-{}", ply.id)),
+                    pk(TIMESTAMPER),
+                    eid_from_str(&ply.id),
+                    Timestamp::from_unix(ply.attested_at),
+                )
+            })
+            .collect();
+        // The Request's canonical attestation sets the cutoff the chain is computed against.
+        attestations.push(Attestation::new(
+            eid_from_str("att-request"),
+            pk(TIMESTAMPER),
+            request_id,
+            Timestamp::from_unix(scenario.cutoff),
+        ));
+
+        let request = AdjudicationRequest::new(request_id, pk(FIRST), session, pk(ARBITER));
+
+        let natural =
+            natural_state(&params, &plies, &attestations, &request).expect("attested request");
+        let chain: Vec<String> = natural
+            .chain
+            .iter()
+            .map(|selected| str_from_eid(&selected.ply.id))
+            .collect();
+
+        assert_eq!(
+            chain, scenario.expected_chain,
+            "scenario {}: selected chain mismatch",
+            scenario.id
         );
     }
 }

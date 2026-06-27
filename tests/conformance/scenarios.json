@@ -1,0 +1,81 @@
+{
+	"version": 1,
+	"category": "scenario",
+	"vectors": [
+		{
+			"id": "scenario.normal-sequential",
+			"note": "three informed legal half-moves: the full chain is selected",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
+				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 200 },
+				{ "id": "m3", "seat": "first", "step": 2, "move": ["a4", "a5", null], "attestedAt": 300 }
+			],
+			"expectedChain": ["m1", "m2", "m3"]
+		},
+		{
+			"id": "scenario.forgiven-blind-premove",
+			"note": "Alice/Bob: first plays Ra1-a4 (informed); second had blind-premoved two anterior candidates for their slot — an illegal Ke8-e6 (earliest) and a legal Ke8-e7. K=1: only the earliest anterior (illegal) is considered, forgiven (skipped); the legal correction is ignored, so the slot reverts to the player and the chain stops at the first move",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 200 },
+				{ "id": "bad", "seat": "second", "step": 1, "move": ["e8", "e6", null], "attestedAt": 50 },
+				{ "id": "good", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 60 }
+			],
+			"expectedChain": ["m1"]
+		},
+		{
+			"id": "scenario.deep-anterior-premove-applied",
+			"note": "first plays step 1 (informed @100) and step 2 (a premove @110, attested before second's reply @200 — anterior to its slot 3); second answers step 1 @200; the interleaved chain consumes all three, the step-2 premove applying as a forgiving anterior selection",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
+				{ "id": "pre", "seat": "first", "step": 2, "move": ["a4", "a5", null], "attestedAt": 110 },
+				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 200 }
+			],
+			"expectedChain": ["m1", "m2", "pre"]
+		},
+		{
+			"id": "scenario.informed-illegal-stops",
+			"note": "first plays Ra1-a4; second then plays an informed illegal move (Ke8-e6, attested after the anchor): the chain stops there and the illegal informed ply is not included (the arbiter renders illegalmove against its signer)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
+				{ "id": "bad", "seat": "second", "step": 1, "move": ["e8", "e6", null], "attestedAt": 200 }
+			],
+			"expectedChain": ["m1"]
+		},
+		{
+			"id": "scenario.cutoff-excludes-late-ply",
+			"note": "a third half-move attested after the cutoff is excluded; the chain stops at the second",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
+				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 200 },
+				{ "id": "m3", "seat": "first", "step": 2, "move": ["a4", "a5", null], "attestedAt": 2000 }
+			],
+			"expectedChain": ["m1", "m2"]
+		},
+		{
+			"id": "scenario.abandonment-unfilled",
+			"note": "first plays; the opponent never fills their slot, so the chain stops at one half-move (the slot stays unfilled and the on-move player's clock runs — adjudication resolves it)",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 }
+			],
+			"expectedChain": ["m1"]
+		}
+	]
+}
