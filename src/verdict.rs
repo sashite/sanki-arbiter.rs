@@ -7,53 +7,43 @@
 //!
 //! # Verdict resolution
 //!
-//! Two candidate families may coexist in the same natural state and are ranked
-//! by **attestation time** — each candidate is anchored to the canonical
-//! attestation `created_at` of the event that produced it, the earliest cause
-//! rules, and an **equivocation wins an exact tie**:
+//! Under the forgiving-premove model the verdict is **entirely play-derived** —
+//! there is no separate equivocation sanction. The natural-state replay
+//! ([`crate::natural_state`]) selects and applies the canonical Ply of each slot
+//! and yields one of two conclusions:
 //!
-//! - the **equivocation** candidate (`illegalmove`) — a violation of the
-//!   single-content rule, anchored at the second-attested differing Ply of a
-//!   `(session, signer, step)` slot ([`crate::commitment`]); it may sit
-//!   anywhere in the session, including on a pending slot;
-//! - the **play-derived** candidate, computed in two stages, mutually
-//!   exclusive by construction:
-//!   1. **chain replay** — the canonical chain is replayed in the play order,
-//!      evaluating the canonical Ply at each successive slot; an illegal or
-//!      unparseable evaluated Ply (`illegalmove`), a rule-system ending, or a
-//!      played-Ply timeout (`timeout`) terminates at that Ply's attestation;
-//!   2. **post-chain resolution** — on a still-ongoing position, the
-//!      invocation itself is resolved at the cutoff, in order: draw acceptance
-//!      (`agreement`, [`crate::implicit`]); abandonment timeout (`timeout`:
-//!      the on-move player's clock, ticked from the chain's last attestation —
-//!      or t₀ for an empty chain — to the cutoff, has expired); otherwise
-//!      **residual resignation** (`resignation`, decisive against the invoker,
-//!      whatever the turn).
+//! - a **terminal** verdict reached during replay — an informed illegal move
+//!   (`illegalmove`), a rule-system ending (checkmate, …), or a played-Ply
+//!   timeout — which is the verdict directly; or
+//! - a still-**ongoing** end position, on which the invocation is resolved at the
+//!   cutoff, in order: draw acceptance (`agreement`, [`crate::implicit`]);
+//!   abandonment timeout (`timeout`: the on-move player's clock, ticked from the
+//!   chain's last attestation — or t₀ for an empty chain — to the cutoff, has
+//!   expired); otherwise **residual resignation** (`resignation`, decisive
+//!   against the invoker, whatever the turn).
 //!
-//! Because resignation is the residual interpretation, a conforming,
-//! canonically attested Request from a session player **always yields a
-//! verdict**. [`adjudicate`] returns `None` only when the Request is not yet
-//! canonically attested (the cutoff is undefined) or its signer is not a
-//! session player (a non-conforming Request, kind `6424` §Semantic
-//! constraints).
+//! An illegal *blind* premove is never a cause: it is forgiven (skipped) during
+//! selection, so only an *informed* illegal move terminates. Because resignation
+//! is the residual interpretation, a conforming, canonically attested Request
+//! from a session player **always yields a verdict**. [`adjudicate`] returns
+//! `None` only when the Request is not yet canonically attested (the cutoff is
+//! undefined) or its signer is not a session player (a non-conforming Request,
+//! kind `6424` §Semantic constraints).
 //!
 //! Selecting **which** Request to rule on — several may coexist, and the
 //! choice fixes the cutoff, hence the verdict — is the caller's concern:
 //! Sashité's arbiter rules on the earliest canonically attested conforming
 //! Request not yet adjudicated (Statuses — Sanki §Which Request rules).
 
-use crate::commitment::equivocation;
 use crate::event::{AdjudicationRequest, Attestation, Ply};
 use crate::implicit::draw_acceptance;
-use crate::natural_state::{natural_state, NaturalState};
+use crate::natural_state::{natural_state, Conclusion, NaturalState};
 use crate::session::SessionParams;
 use sashite_sanki_engine::clock::tick;
-use sashite_sanki_engine::domain::half_move::Move;
 use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::side::Side;
 use sashite_sanki_engine::domain::status::{Outcome3, Status};
-use sashite_sanki_engine::domain::time::{Duration, Timestamp};
-use sashite_sanki_engine::kernel::step::step;
+use sashite_sanki_engine::domain::time::Duration;
 
 /// The arbiter's binding verdict: a termination status and a result
 /// distribution.
@@ -118,64 +108,34 @@ pub fn adjudicate(
     let invoker = params.side_of(request.signer)?;
 
     // The natural state is also the gate: no canonical Request attestation, no
-    // cutoff, no ruling.
+    // cutoff, no ruling. The replay has already selected and applied the chain.
     let natural = natural_state(params, plies, attestations, request)?;
 
-    // Candidate 1 — an equivocation, anchored at the violating Ply.
-    let violation = equivocation(params, plies, attestations, natural.cutoff).map(|violation| {
-        (
-            Verdict::decisive(Status::IllegalMove, violation.loser),
-            violation.at,
-        )
-    });
-
-    // Candidate 2 — what the play itself produces (replay + post-chain).
-    let play = resolve_play(params, &natural, request, invoker);
-
-    // The earliest candidate rules; an equivocation wins an exact tie.
-    let verdict = match violation {
-        Some(violation) if violation.1 <= play.1 => violation.0,
-        _ => play.0,
-    };
-
+    let verdict = resolve_play(params, &natural, request, invoker);
     Adjudication::from_verdict(verdict)
 }
 
-/// Replays the canonical chain through the kernel and, if the game is still
-/// ongoing at its end, resolves the invocation at the cutoff — in order: draw
-/// acceptance, abandonment timeout, residual resignation. Returns the verdict
-/// and the attestation time that caused it.
+/// The verdict the play produces: the natural state's terminal verdict if the
+/// replay reached one, otherwise the invocation resolved at the cutoff on the
+/// ongoing end position — in order: draw acceptance, abandonment timeout,
+/// residual resignation.
 fn resolve_play(
     params: &SessionParams,
     natural: &NaturalState<'_>,
     request: &AdjudicationRequest,
     invoker: Side,
-) -> (Verdict, Timestamp) {
-    let mut state = params.initial_state();
-
-    for canonical in &natural.chain {
-        // An evaluated Ply whose content does not parse is an illegal move by
-        // its signer — the side on move at this point of the replay.
-        let Ok(mv) = Move::parse(&canonical.ply.content) else {
-            let loser = state.position().active_side();
-            return (Verdict::decisive(Status::IllegalMove, loser), canonical.at);
-        };
-
-        let outcome = step(state, &mv, canonical.at);
-        match outcome.next {
-            Some(next) => state = next,
-            // This Ply terminates the game (illegal move, rule-system ending, or
-            // a played-ply timeout).
-            None => return (outcome.outcome.verdict, canonical.at),
-        }
-    }
-
-    // The chain replayed to a still-ongoing position. Resolve the invocation,
-    // in order (Statuses — Sanki §Verdict resolution, stage 2).
+) -> Verdict {
+    let state = match &natural.conclusion {
+        // The replay terminated (illegal informed move, rule-system ending, or a
+        // played-ply timeout): that is the verdict.
+        Conclusion::Terminal(verdict, _at) => return *verdict,
+        // Still ongoing: resolve the invocation at the cutoff.
+        Conclusion::Ongoing(state) => state,
+    };
 
     // 2a. Draw acceptance: a standing offer accepted by the offeree.
     if let Some(verdict) = draw_acceptance(params, natural, request) {
-        return (verdict, natural.cutoff);
+        return verdict;
     }
 
     // 2b. Abandonment timeout: the player on move let their clock run out
@@ -186,15 +146,12 @@ fn resolve_play(
         .duration_since(state.last_attestation())
         .unwrap_or(Duration::ZERO);
     if tick(params.time_control(), state.clocks().get(on_move), elapsed).is_flagged() {
-        return (Verdict::decisive(Status::Timeout, on_move), natural.cutoff);
+        return Verdict::decisive(Status::Timeout, on_move);
     }
 
     // 2c. Residual resignation: the invocation matches no other cause, so the
     // invoker abandons — whatever the turn.
-    (
-        Verdict::decisive(Status::Resignation, invoker),
-        natural.cutoff,
-    )
+    Verdict::decisive(Status::Resignation, invoker)
 }
 
 #[cfg(test)]
@@ -299,37 +256,21 @@ mod tests {
     }
 
     #[test]
-    fn equivocation_outranks_play() {
-        // The first player equivocates at their step 1 (canonical a4 @100,
-        // divergent a5 @200); the play-derived candidate (an abandonment timeout
-        // against the second player at the cutoff 1000) is later, so the earlier
-        // violation rules: illegalmove against the first player.
+    fn differing_contents_are_not_an_equivocation_loss() {
+        // The first player publishes two differing step-1 contents (a4 @100, a5
+        // @200). Under the forgiving rule there is no equivocation sanction: the
+        // earliest qualifying candidate (a4) simply fills the slot and the later
+        // divergent a5 is ignored. The second player's invocation at 400 (within
+        // time) is then a residual resignation — not a loss for the first player.
         let plies = [
             ply(1, FIRST, 1, "[\"a1\",\"a4\",null]"),
             ply(2, FIRST, 1, "[\"a1\",\"a5\",null]"),
         ];
-        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 1000)];
+        let atts = [att(101, 1, 100), att(102, 2, 200), att(171, REQUEST, 400)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
         let adj = adjudicate(&p, &plies, &atts, &request(SECOND)).expect("verdict");
-        assert_eq!(adj.status(), Status::IllegalMove);
-        assert_eq!(adj.result(), Outcome3::SecondWins);
-    }
-
-    #[test]
-    fn equivocation_wins_an_exact_tie() {
-        // The divergent content is attested exactly at the cutoff (1000), where
-        // the play-derived candidate is an abandonment timeout against the second
-        // player. Without the tie rule the timeout would make the first player
-        // win; the equivocation (by the first player) wins the tie instead.
-        let plies = [
-            ply(1, FIRST, 1, "[\"a1\",\"a4\",null]"),
-            ply(2, FIRST, 1, "[\"a1\",\"a5\",null]"),
-        ];
-        let atts = [att(101, 1, 100), att(102, 2, 1000), att(171, REQUEST, 1000)];
-        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
-        let adj = adjudicate(&p, &plies, &atts, &request(FIRST)).expect("verdict");
-        assert_eq!(adj.status(), Status::IllegalMove);
-        assert_eq!(adj.result(), Outcome3::SecondWins);
+        assert_eq!(adj.status(), Status::Resignation);
+        assert_eq!(adj.result(), Outcome3::FirstWins);
     }
 
     #[test]

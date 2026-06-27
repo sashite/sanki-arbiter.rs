@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "category": "selection",
+  "vectors": [
+    {
+      "id": "selection.legal-anterior-applied",
+      "note": "a single legal blind premove is applied",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 20, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "a1" }
+    },
+    {
+      "id": "selection.illegal-anterior-no-informed-unfilled",
+      "note": "a single illegal blind premove is skipped; with no informed candidate the slot waits",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 20, "legal": false }
+      ],
+      "expected": { "result": "unfilled", "selected": null }
+    },
+    {
+      "id": "selection.k1-no-repreplay-falls-to-informed",
+      "note": "K=1: the earliest anterior premove (a1) is illegal and skipped; the second anterior (a2, legal) is ignored — no re-pre-play — so selection falls through to the informed move (a3)",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 10, "legal": false },
+        { "id": "a2", "createdAt": 20, "legal": true },
+        { "id": "a3", "createdAt": 70, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "a3" }
+    },
+    {
+      "id": "selection.legal-premove-binding-earliest-wins",
+      "note": "two legal anterior candidates: the earliest-attested wins; a later divergent legal premove is ineffective",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a2", "createdAt": 20, "legal": true },
+        { "id": "a1", "createdAt": 10, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "a1" }
+    },
+    {
+      "id": "selection.fall-through-to-informed-legal",
+      "note": "illegal anterior skipped; selection falls through to the earliest informed (legal) move",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 10, "legal": false },
+        { "id": "a2", "createdAt": 60, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "a2" }
+    },
+    {
+      "id": "selection.informed-illegal-loses",
+      "note": "illegal anterior skipped; the earliest informed candidate is illegal -> illegalmove against its signer",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 10, "legal": false },
+        { "id": "a2", "createdAt": 55, "legal": false }
+      ],
+      "expected": { "result": "illegalmove", "selected": "a2" }
+    },
+    {
+      "id": "selection.informed-legal-normal-move",
+      "note": "a plain informed (live) legal move",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 60, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "a1" }
+    },
+    {
+      "id": "selection.informed-illegal-only",
+      "note": "an informed (live) illegal move -> illegalmove",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 60, "legal": false }
+      ],
+      "expected": { "result": "illegalmove", "selected": "a1" }
+    },
+    {
+      "id": "selection.earliest-informed-wins-even-if-illegal",
+      "note": "among informed candidates the earliest is selected regardless of legality; a later legal informed does not save it",
+      "anchor": 50,
+      "candidates": [
+        { "id": "a1", "createdAt": 55, "legal": false },
+        { "id": "a2", "createdAt": 60, "legal": true }
+      ],
+      "expected": { "result": "illegalmove", "selected": "a1" }
+    },
+    {
+      "id": "selection.createdat-tie-id-tiebreak",
+      "note": "equal createdAt -> smallest id wins (b1 < b2 lexicographically)",
+      "anchor": 50,
+      "candidates": [
+        { "id": "b2", "createdAt": 20, "legal": true },
+        { "id": "b1", "createdAt": 20, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "b1" }
+    },
+    {
+      "id": "selection.k1-second-anterior-ignored-unfilled",
+      "note": "K=1: the earliest anterior premove (c1) is illegal and skipped; the second anterior (c2, legal) is ignored — no re-pre-play; with no informed candidate the slot is unfilled",
+      "anchor": 100,
+      "candidates": [
+        { "id": "c1", "createdAt": 1, "legal": false },
+        { "id": "c2", "createdAt": 2, "legal": true }
+      ],
+      "expected": { "result": "unfilled", "selected": null }
+    },
+    {
+      "id": "selection.first-slot-anchor-t0-informed-legal",
+      "note": "the first slot has anchor = t0, so a candidate attested at/after t0 is informed; legal -> applied",
+      "anchor": 0,
+      "candidates": [
+        { "id": "a1", "createdAt": 5, "legal": true }
+      ],
+      "expected": { "result": "applied", "selected": "a1" }
+    },
+    {
+      "id": "selection.first-slot-anchor-t0-informed-illegal",
+      "note": "first-slot informed illegal move -> illegalmove (no anterior candidates are possible before t0)",
+      "anchor": 0,
+      "candidates": [
+        { "id": "a1", "createdAt": 5, "legal": false }
+      ],
+      "expected": { "result": "illegalmove", "selected": "a1" }
+    }
+  ]
+}

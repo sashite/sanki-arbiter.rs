@@ -4,6 +4,52 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-27
+
+Adopts the **forgiving-premove** model (ADR-0002): a slot's candidate Plies are
+resolved by legality and anteriority — an illegal *blind* premove is forgiven
+(skipped), not sanctioned — and the equivocation sanction is removed entirely.
+
+### Added
+
+- **`selection` module** — the pure `select_candidate(anchor, candidates) ->
+  Applied | IllegalMove | Unfilled`, generic over the candidate id, implementing
+  the selection rule with the normative `K = 1` anterior cap (one premove per
+  slot, no re-pre-play). Mirrors the TypeScript client's `selectCandidate`.
+- **Selection conformance test** (`tests/conformance.rs`) driving the shared
+  `selection.json` vectors (vendored at `tests/conformance/`) through
+  `select_candidate`, pinning bit-for-bit parity with the TypeScript client.
+  Adds `serde` / `serde_json` as dev-dependencies.
+
+### Changed — breaking
+
+- **Forgiving natural-state replay.** `natural_state` now selects each slot's
+  canonical Ply by the forgiving rule and applies it through the engine in a
+  single pass (legality is judged on the replayed board). `NaturalState` gains a
+  `conclusion: Conclusion` field — `Conclusion::Terminal(verdict, at)` for an
+  in-replay ending (informed illegal move, rule-system ending, or played-Ply
+  timeout) or `Conclusion::Ongoing(Box<SessionState>)` for the post-chain
+  resolution. The chain no longer includes a terminating *informed-illegal* Ply.
+- **Play-derived verdict only.** `verdict` drops the equivocation candidate
+  family and the separate second replay; the verdict is the natural state's
+  terminal conclusion, else the invocation resolved at the cutoff (draw
+  acceptance → abandonment timeout → residual resignation).
+
+### Removed — breaking
+
+- **`commitment` module** — the single-content / equivocation / mutual-
+  equivocation sanction. Differing contents for a slot are no longer a violation
+  but ordinary candidates resolved by `selection`; a misfired blind premove is
+  forgiven rather than ruled `illegalmove`.
+
+### Unchanged
+
+- The `adjudicate` entry point and `Adjudication` are source-compatible (same
+  signatures and results for legal play).
+- Race resolution (`canonical_attestation`, `canonical_ply`) and its tiebreaks.
+- The post-chain resolution order (agreement → timeout → resignation) and
+  rule-system / timeout terminations.
+
 ## [0.2.1] — 2026-06-13
 
 ### Changed

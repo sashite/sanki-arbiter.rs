@@ -13,10 +13,10 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(missing_docs))]
 
-pub mod commitment;
 pub mod event;
 pub mod implicit;
 pub mod natural_state;
 pub mod race_resolution;
+pub mod selection;
 pub mod session;
 pub mod verdict;

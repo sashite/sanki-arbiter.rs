@@ -55,7 +55,7 @@ mod tests {
 
     use super::draw_acceptance;
     use crate::event::{AdjudicationRequest, EventId, Ply, PublicKey};
-    use crate::natural_state::NaturalState;
+    use crate::natural_state::{Conclusion, NaturalState};
     use crate::race_resolution::CanonicalPly;
     use crate::session::SessionParams;
     use sashite_sanki_engine::domain::outcome::Verdict;
@@ -113,6 +113,7 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
+            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         let verdict = draw_acceptance(&params(), &natural, &request(SECOND));
         assert_eq!(verdict, Some(Verdict::drawn(Status::Agreement)));
@@ -127,6 +128,7 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
+            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         assert!(draw_acceptance(&params(), &natural, &request(SECOND)).is_none());
     }
@@ -149,6 +151,7 @@ mod tests {
                 },
             ],
             cutoff: ts(1000),
+            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         assert!(draw_acceptance(&params(), &natural, &request(FIRST)).is_none());
     }
@@ -164,6 +167,7 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
+            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         assert!(draw_acceptance(&params(), &natural, &request(FIRST)).is_none());
     }
@@ -173,6 +177,7 @@ mod tests {
         let natural = NaturalState {
             chain: Vec::new(),
             cutoff: ts(1000),
+            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         assert!(draw_acceptance(&params(), &natural, &request(SECOND)).is_none());
     }
@@ -186,6 +191,7 @@ mod tests {
                 at: ts(100),
             }],
             cutoff: ts(1000),
+            conclusion: Conclusion::Ongoing(Box::new(params().initial_state())),
         };
         assert!(draw_acceptance(&params(), &natural, &request(77)).is_none());
     }
