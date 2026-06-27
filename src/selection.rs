@@ -142,10 +142,7 @@ mod tests {
     #[test]
     fn legal_anterior_applied() {
         let cs = [cand("a1", 20, true)];
-        assert_eq!(
-            select_candidate(ts(50), &cs),
-            Selection::Applied(&cs[0])
-        );
+        assert_eq!(select_candidate(ts(50), &cs), Selection::Applied(&cs[0]));
     }
 
     #[test]
@@ -183,7 +180,10 @@ mod tests {
     #[test]
     fn informed_illegal_loses() {
         let cs = [cand("a1", 10, false), cand("a2", 55, false)];
-        assert_eq!(select_candidate(ts(50), &cs), Selection::IllegalMove(&cs[1]));
+        assert_eq!(
+            select_candidate(ts(50), &cs),
+            Selection::IllegalMove(&cs[1])
+        );
     }
 
     #[test]
@@ -191,7 +191,10 @@ mod tests {
         // Among informed candidates the earliest is selected regardless of legality;
         // a later legal informed does not save the slot.
         let cs = [cand("a1", 55, false), cand("a2", 60, true)];
-        assert_eq!(select_candidate(ts(50), &cs), Selection::IllegalMove(&cs[0]));
+        assert_eq!(
+            select_candidate(ts(50), &cs),
+            Selection::IllegalMove(&cs[0])
+        );
     }
 
     #[test]
@@ -212,7 +215,10 @@ mod tests {
     fn first_slot_anchor_t0_informed() {
         // anchor = t0 = 0: a candidate at/after 0 is informed.
         let legal = [cand("a1", 5, true)];
-        assert_eq!(select_candidate(ts(0), &legal), Selection::Applied(&legal[0]));
+        assert_eq!(
+            select_candidate(ts(0), &legal),
+            Selection::Applied(&legal[0])
+        );
         let illegal = [cand("a1", 5, false)];
         assert_eq!(
             select_candidate(ts(0), &illegal),

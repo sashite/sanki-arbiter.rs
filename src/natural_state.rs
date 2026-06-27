@@ -195,10 +195,7 @@ pub fn natural_state<'a>(
                 // failure is treated as an illegal move by the side on move.
                 let Ok(mv) = Move::parse(&ply.content) else {
                     let loser = state.position().active_side();
-                    break Conclusion::Terminal(
-                        Verdict::decisive(Status::IllegalMove, loser),
-                        at,
-                    );
+                    break Conclusion::Terminal(Verdict::decisive(Status::IllegalMove, loser), at);
                 };
 
                 let result = step(state, &mv, at);
@@ -264,7 +261,14 @@ mod tests {
     }
 
     fn ply(id: u8, signer: u8, step: u32, content: &str) -> Ply {
-        Ply::new(eid(id), pk(signer), eid(SESSION), step, false, content.to_owned())
+        Ply::new(
+            eid(id),
+            pk(signer),
+            eid(SESSION),
+            step,
+            false,
+            content.to_owned(),
+        )
     }
 
     fn att(id: u8, attests: u8, at: i64) -> Attestation {
@@ -442,7 +446,10 @@ mod tests {
         assert_eq!(ns.chain.len(), 1); // the illegal informed Ply is not in the chain
         match ns.conclusion {
             Conclusion::Terminal(verdict, at) => {
-                assert_eq!(verdict, Verdict::decisive(Status::IllegalMove, Side::Second));
+                assert_eq!(
+                    verdict,
+                    Verdict::decisive(Status::IllegalMove, Side::Second)
+                );
                 assert_eq!(at, ts(200));
             }
             Conclusion::Ongoing(_) => panic!("expected an illegalmove termination"),
