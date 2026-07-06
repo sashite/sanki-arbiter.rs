@@ -13,27 +13,28 @@
 //! `cutoff` the triggering Request's canonical attestation (so a player cannot
 //! race the arbiter by playing after invoking). The slot's **anchor** is the
 //! predecessor half-move's canonical attestation (`t₀` for the first slot), and
-//! [`select_candidate`] resolves the candidates against it:
+//! [`select_candidate`] resolves the candidates against it (the boundary `T`):
 //!
-//! - **applied** — the selected Ply is applied to the board; an illegal *blind*
-//!   premove is forgiven (skipped) per the `K = 1` rule, never sanctioned;
-//! - **illegalmove** — the selected *informed* Ply is illegal: the chain
-//!   terminates, decisive against its signer;
-//! - **unfilled** — no candidate qualifies: the chain stops, still ongoing.
+//! - **applied** — the selected Ply is applied to the board: the *latest* legal
+//!   premove (anterior, timed before `T`), else the *earliest* legal live move
+//!   (informed, timed at/after `T`). An illegal candidate — premove or live — is
+//!   skipped, never sanctioned;
+//! - **unfilled** — no candidate is legal in either window: the chain stops, still
+//!   ongoing.
 //!
 //! Applying a selected Ply through the engine ([`step`]) also surfaces a
-//! rule-system ending (checkmate, …) or a played-Ply timeout, which likewise
-//! terminates the chain. The replay therefore yields either a **terminal
-//! verdict** (illegalmove / rule-system ending / timeout, with the attestation
-//! time that caused it) or a still-**ongoing** end position for the post-chain
-//! resolution ([`crate::verdict`]).
+//! rule-system ending (checkmate, …) or a played-Ply timeout, which terminates the
+//! chain. The replay therefore yields either a **terminal verdict** (rule-system
+//! ending / timeout, with the attestation time that caused it) or a still-**ongoing**
+//! end position for the post-chain resolution ([`crate::verdict`]). There is no
+//! `illegalmove` termination — an illegal Ply is skipped, never a loss.
 //!
 //! If the Request is not yet canonically attested the cutoff is undefined and the
 //! natural state cannot be computed ([`natural_state`] returns `None`).
 
 use crate::event::{AdjudicationRequest, Attestation, EventId, Ply};
 use crate::race_resolution::{canonical_attestation, CanonicalPly};
-use crate::selection::{select_candidate, Candidate, Selection};
+use crate::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
 use crate::session::SessionParams;
 use sashite_sanki_engine::domain::half_move::Move;
 use sashite_sanki_engine::domain::outcome::Verdict;
@@ -45,9 +46,9 @@ use sashite_sanki_engine::kernel::step::step;
 /// How the replayed chain ends.
 #[derive(Debug, Clone)]
 pub enum Conclusion {
-    /// The chain reached a terminal verdict during replay — an informed illegal
-    /// move, a rule-system ending, or a played-Ply timeout — at the given
-    /// attestation time. Post-chain resolution does not apply.
+    /// The chain reached a terminal verdict during replay — a rule-system ending
+    /// or a played-Ply timeout — at the given attestation time. Post-chain
+    /// resolution does not apply.
     Terminal(Verdict, Timestamp),
     /// The chain replayed to a still-ongoing position: post-chain resolution
     /// (draw acceptance, abandonment timeout, residual resignation) decides the
@@ -61,9 +62,8 @@ pub enum Conclusion {
 #[derive(Debug, Clone)]
 pub struct NaturalState<'a> {
     /// The selected canonical Plies, `chain[i]` being the Ply at play-order
-    /// position `i + 1`. A terminating informed-illegal Ply is **not** included
-    /// (it is not a played half-move); a terminating *applied* Ply (a mating
-    /// move, …) **is**.
+    /// position `i + 1`. A skipped illegal candidate is **not** included (it is not
+    /// a played half-move); a terminating *applied* Ply (a mating move, …) **is**.
     pub chain: Vec<CanonicalPly<'a>>,
     /// The cutoff: the triggering Request's canonical attestation `created_at`.
     pub cutoff: Timestamp,
@@ -163,19 +163,9 @@ pub fn natural_state<'a>(
 
         let candidates: Vec<Candidate<EventId>> = slot.iter().map(|sc| sc.candidate).collect();
 
-        match select_candidate(anchor, &candidates) {
-            // No candidate qualifies: the chain stops, still ongoing.
+        match select_candidate(anchor, &candidates, CANDIDATE_CAP) {
+            // No candidate is legal in either window: the chain stops, still ongoing.
             Selection::Unfilled => break Conclusion::Ongoing(Box::new(state)),
-
-            // The earliest informed candidate is illegal: decisive against its
-            // signer (the side on move at this slot).
-            Selection::IllegalMove(chosen) => {
-                let loser = state.position().active_side();
-                break Conclusion::Terminal(
-                    Verdict::decisive(Status::IllegalMove, loser),
-                    chosen.created_at,
-                );
-            }
 
             // A candidate fills the slot: apply it and advance (or terminate on a
             // rule-system ending / timeout the application surfaces).
@@ -192,10 +182,9 @@ pub fn natural_state<'a>(
                 };
 
                 // Selection guarantees legality, so the content parses; a defensive
-                // failure is treated as an illegal move by the side on move.
+                // failure stops the chain safely (an illegal Ply is never a loss).
                 let Ok(mv) = Move::parse(&ply.content) else {
-                    let loser = state.position().active_side();
-                    break Conclusion::Terminal(Verdict::decisive(Status::IllegalMove, loser), at);
+                    break Conclusion::Ongoing(Box::new(state));
                 };
 
                 let result = step(state, &mv, at);
@@ -232,7 +221,6 @@ mod tests {
     use crate::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
     use crate::session::SessionParams;
     use sashite_sanki_engine::domain::outcome::Verdict;
-    use sashite_sanki_engine::domain::side::Side;
     use sashite_sanki_engine::domain::status::Status;
     use sashite_sanki_engine::domain::time::{Duration, Timestamp};
     use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
@@ -409,16 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn forgives_blind_illegal_premove_and_ignores_the_correction() {
-        // Alice/Bob: `first` plays Ra1-a4 informed @200. `second` premoved two
-        // candidates for slot 2, both anterior (before 200): an illegal Ke8-e6
-        // (earliest @50) and a legal Ke8-e7 (@60). K = 1: only the earliest
-        // anterior (illegal) is considered — skipped (forgiven) — and the legal
-        // correction is ignored, so the slot reverts to the player: chain of 1.
+    fn re_premove_correction_supersedes_illegal_premove() {
+        // `first` plays Ra1-a4 informed @200. `second` premoved two candidates for
+        // slot 2, both anterior (before 200): an illegal Ke8-e6 (older @50) and a
+        // newer legal Ke8-e7 (@60). The anterior window binds the LATEST legal
+        // premove: the illegal older one is skipped and the newer legal correction
+        // fills the slot — chain of 2.
         let plies = [
             ply(1, FIRST, 1, RA1A4),
-            ply(2, SECOND, 1, "[\"e8\",\"e6\",null]"), // illegal (king moves two), earliest
-            ply(3, SECOND, 1, KE8E7),                  // legal, ignored under K=1
+            ply(2, SECOND, 1, "[\"e8\",\"e6\",null]"), // illegal (king moves two), older @50
+            ply(3, SECOND, 1, KE8E7),                  // legal, newer @60 -> wins
         ];
         let atts = [
             att(101, 1, 200),
@@ -427,33 +415,24 @@ mod tests {
             cutoff_att(1000),
         ];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
-        assert_eq!(ns.chain.len(), 1);
-        assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
+        assert_eq!(ns.chain.len(), 2);
+        assert_eq!(*ns.chain[1].ply.id.as_bytes(), [3; 32]);
         assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
     }
 
     #[test]
-    fn informed_illegal_terminates_with_illegalmove() {
+    fn informed_illegal_is_skipped_leaving_ongoing() {
         // `first` plays Ra1-a4 @100 (applied); `second` then plays an informed
-        // illegal move (Ke8-e6 @200, ≥ anchor 100): illegalmove, decisive
-        // against the second player.
+        // illegal move (Ke8-e6 @200, ≥ boundary 100). Under the two-window rule it is
+        // skipped (no `illegalmove`), leaving the slot unfilled and the chain ongoing.
         let plies = [
             ply(1, FIRST, 1, RA1A4),
             ply(2, SECOND, 1, "[\"e8\",\"e6\",null]"),
         ];
         let atts = [att(101, 1, 100), att(102, 2, 200), cutoff_att(1000)];
         let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
-        assert_eq!(ns.chain.len(), 1); // the illegal informed Ply is not in the chain
-        match ns.conclusion {
-            Conclusion::Terminal(verdict, at) => {
-                assert_eq!(
-                    verdict,
-                    Verdict::decisive(Status::IllegalMove, Side::Second)
-                );
-                assert_eq!(at, ts(200));
-            }
-            Conclusion::Ongoing(_) => panic!("expected an illegalmove termination"),
-        }
+        assert_eq!(ns.chain.len(), 1); // the illegal live move is skipped, not in the chain
+        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
     }
 
     #[test]

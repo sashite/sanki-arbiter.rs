@@ -4,9 +4,57 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-06
+
+Revises the forgiving-premove model to the **two-window** selection: a
+slot's premoves and live moves are ranked separately around the predecessor's
+timing — the *latest* legal premove binds, else the *earliest* legal live move —
+and an illegal candidate (premove or live) is always skipped, so the `illegalmove`
+termination is gone.
+
+### Changed — breaking
+
+- **`selection` module — two-window rule.** `select_candidate` now takes the
+  slot's `boundary` and a per-window `cap`: `select_candidate(boundary,
+  candidates, cap) -> Applied | Unfilled`. A candidate timed **before** the
+  boundary is *anterior* (a premove); one **at or after** it is *informed* (a live
+  move). Among the `cap` most-recent anterior candidates the **latest legal**
+  wins; failing that, among the `cap` earliest informed candidates the **earliest
+  legal** wins. The `Selection::IllegalMove` variant is removed (leaving
+  `Applied | Unfilled`), and the `ANTERIOR_CAP = 1` constant becomes the
+  per-window `CANDIDATE_CAP = 8`.
+- **No `illegalmove` termination.** An illegal candidate — premove or live — is
+  always skipped, never a loss. `natural_state` no longer produces an
+  `illegalmove` verdict; `Conclusion::Terminal` now carries only a rule-system
+  ending or a played-Ply timeout, and a slot with no legal candidate in either
+  window leaves the chain ongoing. `verdict` drops the informed-illegal cause.
+
+### Removed — breaking
+
+- **`Selection::IllegalMove`** and the **`ANTERIOR_CAP`** constant — superseded by
+  the two-window `Selection` (`Applied | Unfilled`) and `CANDIDATE_CAP`.
+
+### Changed
+
+- **Conformance corpus (v3).** The vendored vectors and `tests/conformance.rs`
+  track the shared set: `selection.json` gains `boundary` and a per-window `cap`
+  (17 vectors), `scenarios.json` uses `timedAt` and adds the re-premove and
+  premove-over-live cases (8 vectors) — kept bit-for-bit with the TypeScript
+  client.
+
+### Unchanged
+
+- The `adjudicate` entry point and `Adjudication` are source-compatible (same
+  signatures and results for legal play).
+- Race resolution (`canonical_attestation`, `canonical_ply`) and its tiebreaks.
+- The post-chain resolution order (agreement → timeout → resignation) and the
+  rule-system / timeout terminations.
+- `Status::IllegalMove` remains the engine's internal legality signal (consumed by
+  `natural_state::is_legal`); the arbiter simply never emits it as a verdict.
+
 ## [0.3.0] — 2026-06-27
 
-Adopts the **forgiving-premove** model (ADR-0002): a slot's candidate Plies are
+Adopts the **forgiving-premove** model: a slot's candidate Plies are
 resolved by legality and anteriority — an illegal *blind* premove is forgiven
 (skipped), not sanctioned — and the equivocation sanction is removed entirely.
 

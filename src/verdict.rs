@@ -12,9 +12,8 @@
 //! ([`crate::natural_state`]) selects and applies the canonical Ply of each slot
 //! and yields one of two conclusions:
 //!
-//! - a **terminal** verdict reached during replay — an informed illegal move
-//!   (`illegalmove`), a rule-system ending (checkmate, …), or a played-Ply
-//!   timeout — which is the verdict directly; or
+//! - a **terminal** verdict reached during replay — a rule-system ending
+//!   (checkmate, …) or a played-Ply timeout — which is the verdict directly; or
 //! - a still-**ongoing** end position, on which the invocation is resolved at the
 //!   cutoff, in order: draw acceptance (`agreement`, [`crate::implicit`]);
 //!   abandonment timeout (`timeout`: the on-move player's clock, ticked from the
@@ -22,9 +21,10 @@
 //!   expired); otherwise **residual resignation** (`resignation`, decisive
 //!   against the invoker, whatever the turn).
 //!
-//! An illegal *blind* premove is never a cause: it is forgiven (skipped) during
-//! selection, so only an *informed* illegal move terminates. Because resignation
-//! is the residual interpretation, a conforming, canonically attested Request
+//! An illegal candidate — premove or live — is never a cause: it is skipped during
+//! selection (never a loss), so there is no `illegalmove` termination. Because
+//! resignation is the residual interpretation, a conforming, canonically attested
+//! Request
 //! from a session player **always yields a verdict**. [`adjudicate`] returns
 //! `None` only when the Request is not yet canonically attested (the cutoff is
 //! undefined) or its signer is not a session player (a non-conforming Request,
@@ -126,8 +126,8 @@ fn resolve_play(
     invoker: Side,
 ) -> Verdict {
     let state = match &natural.conclusion {
-        // The replay terminated (illegal informed move, rule-system ending, or a
-        // played-ply timeout): that is the verdict.
+        // The replay terminated (a rule-system ending or a played-Ply timeout):
+        // that is the verdict.
         Conclusion::Terminal(verdict, _at) => return *verdict,
         // Still ongoing: resolve the invocation at the cutoff.
         Conclusion::Ongoing(state) => state,
@@ -245,14 +245,18 @@ mod tests {
     }
 
     #[test]
-    fn illegal_move_in_the_chain() {
-        // No piece on a1: illegal evaluated Ply by the first player.
+    fn illegal_move_in_the_chain_is_skipped_not_a_loss() {
+        // No piece on a1: the first player's only Ply (a1-a4 @100) is illegal. Under
+        // the two-window forgiving rule it is skipped (no `illegalmove`), leaving the
+        // chain empty and the first player still on move. The second player invokes
+        // within time (cutoff 400 ≤ 600): a residual resignation against the invoker —
+        // the illegal move is NOT a loss for the first player.
         let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
-        let atts = [att(101, 1, 100), att(171, REQUEST, 1000)];
+        let atts = [att(101, 1, 100), att(171, REQUEST, 400)];
         let p = params("4k^3/8/8/8/8/8/8/4K^3 / W/w", 600, 0);
         let adj = adjudicate(&p, &plies, &atts, &request(SECOND)).expect("verdict");
-        assert_eq!(adj.status(), Status::IllegalMove);
-        assert_eq!(adj.result(), Outcome3::SecondWins);
+        assert_eq!(adj.status(), Status::Resignation);
+        assert_eq!(adj.result(), Outcome3::FirstWins);
     }
 
     #[test]

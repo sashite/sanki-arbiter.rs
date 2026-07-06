@@ -1,10 +1,12 @@
-//! Shared conformance vectors — selection and full-session scenarios (ADR-0002).
+//! Shared conformance vectors — selection and full-session scenarios
+//! (Move Encoding — Sanki §Slot candidates and selection).
 //!
 //! Two vendored corpora (copies of the shared set at `web-specs.md/nostr/conformance`):
 //!
 //! - `selection.json` — the pure per-slot rule, driven through [`select_candidate`].
 //!   Each candidate carries its own `legal` (a given), so it pins only the
-//!   *selection algorithm*: anteriority, the first-legal choice, the `K = 1` cap.
+//!   *selection algorithm*: the two windows (anterior latest-legal / informed
+//!   earliest-legal) split at the `boundary`, and the per-window cap `K`.
 //! - `scenarios.json` — full sessions, driven through [`natural_state`]: a founding
 //!   position, plies with their canonical-attestation timings, and a cutoff. The
 //!   asserted **selected chain** is the consensus property — the TypeScript client
@@ -40,7 +42,8 @@ struct Corpus {
 #[derive(serde::Deserialize)]
 struct SelectionVector {
     id: String,
-    anchor: i64,
+    boundary: i64,
+    cap: usize,
     candidates: Vec<CandidateVector>,
     expected: Expected,
 }
@@ -68,7 +71,6 @@ fn corpus_path() -> PathBuf {
 fn outcome(selection: &Selection<'_, String>) -> (&'static str, Option<String>) {
     match selection {
         Selection::Applied(candidate) => ("applied", Some(candidate.id.clone())),
-        Selection::IllegalMove(candidate) => ("illegalmove", Some(candidate.id.clone())),
         Selection::Unfilled => ("unfilled", None),
     }
 }
@@ -98,8 +100,8 @@ fn selection_conformance() {
             })
             .collect();
 
-        let anchor = Timestamp::from_unix(vector.anchor);
-        let (result, selected) = outcome(&select_candidate(anchor, &candidates));
+        let boundary = Timestamp::from_unix(vector.boundary);
+        let (result, selected) = outcome(&select_candidate(boundary, &candidates, vector.cap));
 
         assert_eq!(
             result,
@@ -138,8 +140,8 @@ struct ScenarioPly {
     step: u32,
     #[serde(rename = "move")]
     mv: serde_json::Value,
-    #[serde(rename = "attestedAt")]
-    attested_at: i64,
+    #[serde(rename = "timedAt")]
+    timed_at: i64,
 }
 
 const FIRST: u8 = 10;
@@ -211,7 +213,14 @@ fn scenario_conformance() {
             .map(|ply| {
                 let signer = if ply.seat == "first" { FIRST } else { SECOND };
                 let content = serde_json::to_string(&ply.mv).expect("serialize move");
-                Ply::new(eid_from_str(&ply.id), pk(signer), session, ply.step, false, content)
+                Ply::new(
+                    eid_from_str(&ply.id),
+                    pk(signer),
+                    session,
+                    ply.step,
+                    false,
+                    content,
+                )
             })
             .collect();
 
@@ -223,7 +232,7 @@ fn scenario_conformance() {
                     eid_from_str(&format!("att-{}", ply.id)),
                     pk(TIMESTAMPER),
                     eid_from_str(&ply.id),
-                    Timestamp::from_unix(ply.attested_at),
+                    Timestamp::from_unix(ply.timed_at),
                 )
             })
             .collect();

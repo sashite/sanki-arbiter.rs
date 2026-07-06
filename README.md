@@ -38,16 +38,18 @@ on a session, cut off at the triggering Request's canonical attestation:
   ordinal;
 - the **natural state** replays the interleaved play order (within each step
   value, side `first` before side `second`), selecting each
-  `(session, signer, step)` slot's canonical Ply by the **forgiving-premove**
-  rule: ordered by canonical timing, the earliest *anterior* premove applies if
-  legal (`K = 1` — one premove per slot, no re-pre-play), otherwise the earliest
-  *informed* candidate. An illegal **blind** premove is forgiven (skipped); only
-  an illegal *informed* move rules `illegalmove`;
+  `(session, signer, step)` slot's canonical Ply by the **two-window forgiving**
+  rule against the slot's boundary `T` (the predecessor half-move's canonical
+  timing, t₀ for the first slot): among *anterior* candidates (timed before `T` —
+  premoves) the **latest legal** wins; failing that, among *informed* candidates
+  (timed at/after `T` — live moves) the **earliest legal** wins; each within a
+  per-window cap `K`. An illegal candidate — premove or live — is always
+  **skipped**, never a loss (there is no `illegalmove`);
 - the verdict is entirely **play-derived** (there is no equivocation sanction):
-  a termination reached during replay — an informed illegal move, a rule-system
-  ending, or a played-Ply timeout — otherwise, on a still-ongoing position, the
-  invocation resolved in order: draw acceptance, abandonment timeout, **residual
-  resignation** (decisive against the invoker, whatever the turn).
+  a termination reached during replay — a rule-system ending or a played-Ply
+  timeout — otherwise, on a still-ongoing position, the invocation resolved in
+  order: draw acceptance, abandonment timeout, **residual resignation** (decisive
+  against the invoker, whatever the turn).
 
 `adjudicate` returns `None` only when the Request is not yet canonically
 attested, or its signer is not a session player. Selecting **which** Request to
@@ -65,7 +67,7 @@ canonically attested conforming Request not yet adjudicated.
 
 ```toml
 [dependencies]
-sashite-sanki-arbiter = "0.3"
+sashite-sanki-arbiter = "0.4"
 ```
 
 ```rust
@@ -143,4 +145,4 @@ Rust 1.81.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE).

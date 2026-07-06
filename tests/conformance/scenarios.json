@@ -1,68 +1,94 @@
 {
-	"version": 1,
+	"version": 3,
 	"category": "scenario",
 	"vectors": [
 		{
 			"id": "scenario.normal-sequential",
-			"note": "three informed legal half-moves: the full chain is selected",
+			"note": "three legal half-moves played in order (each at/after its slot's boundary — the preceding half-move's timing): the full chain is selected",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
-				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
-				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 200 },
-				{ "id": "m3", "seat": "first", "step": 2, "move": ["a4", "a5", null], "attestedAt": 300 }
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 100 },
+				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "timedAt": 200 },
+				{ "id": "m3", "seat": "first", "step": 2, "move": ["a4", "a5", null], "timedAt": 300 }
 			],
 			"expectedChain": ["m1", "m2", "m3"]
 		},
 		{
-			"id": "scenario.forgiven-blind-premove",
-			"note": "Alice/Bob: first plays Ra1-a4 (informed); second had blind-premoved two anterior candidates for their slot — an illegal Ke8-e6 (earliest) and a legal Ke8-e7. K=1: only the earliest anterior (illegal) is considered, forgiven (skipped); the legal correction is ignored, so the slot reverts to the player and the chain stops at the first move",
+			"id": "scenario.skip-illegal-premove-then-legal",
+			"note": "first plays Ra1-a4 @200; second had queued two premoves for their slot (both before the boundary 200) — an illegal Ke8-e6 @50 and a newer legal Ke8-e7 @60. The illegal one is skipped and the newer legal premove wins the anterior window (latest-legal)",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
-				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 200 },
-				{ "id": "bad", "seat": "second", "step": 1, "move": ["e8", "e6", null], "attestedAt": 50 },
-				{ "id": "good", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 60 }
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 200 },
+				{ "id": "bad", "seat": "second", "step": 1, "move": ["e8", "e6", null], "timedAt": 50 },
+				{ "id": "good", "seat": "second", "step": 1, "move": ["e8", "e7", null], "timedAt": 60 }
 			],
-			"expectedChain": ["m1"]
+			"expectedChain": ["m1", "good"]
 		},
 		{
-			"id": "scenario.deep-anterior-premove-applied",
-			"note": "first plays step 1 (informed @100) and step 2 (a premove @110, attested before second's reply @200 — anterior to its slot 3); second answers step 1 @200; the interleaved chain consumes all three, the step-2 premove applying as a forgiving anterior selection",
+			"id": "scenario.re-premove-supersedes",
+			"note": "first plays Ra1-a4 @200; second queued two LEGAL premoves for their slot — an earlier Ke8-e7 @50 and a later re-premove Ke8-d8 @60 (both before the boundary 200). The anterior window binds the latest legal premove, so the re-premove wins",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
-				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
-				{ "id": "pre", "seat": "first", "step": 2, "move": ["a4", "a5", null], "attestedAt": 110 },
-				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 200 }
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 200 },
+				{ "id": "pold", "seat": "second", "step": 1, "move": ["e8", "e7", null], "timedAt": 50 },
+				{ "id": "pnew", "seat": "second", "step": 1, "move": ["e8", "d8", null], "timedAt": 60 }
+			],
+			"expectedChain": ["m1", "pnew"]
+		},
+		{
+			"id": "scenario.premove-beats-live",
+			"note": "first plays Ra1-a4 @200; second published both a legal premove Ke8-e7 @50 (anterior, before the boundary 200) and a legal live move Ke8-d8 @300 (informed, after it). The anterior window is tried first, so the legal premove binds and the live move is ineffective",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 200 },
+				{ "id": "p", "seat": "second", "step": 1, "move": ["e8", "e7", null], "timedAt": 50 },
+				{ "id": "live", "seat": "second", "step": 1, "move": ["e8", "d8", null], "timedAt": 300 }
+			],
+			"expectedChain": ["m1", "p"]
+		},
+		{
+			"id": "scenario.deep-premove-applied",
+			"note": "first plays step 1 @100 and a step-2 premove @110 (before second's reply @200); second answers step 1 @200. At the step-2 slot the boundary is 200, so the @110 premove is anterior and, as the only legal candidate, wins the anterior window",
+			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
+			"t0": 0,
+			"cutoff": 1000,
+			"plies": [
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 100 },
+				{ "id": "pre", "seat": "first", "step": 2, "move": ["a4", "a5", null], "timedAt": 110 },
+				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "timedAt": 200 }
 			],
 			"expectedChain": ["m1", "m2", "pre"]
 		},
 		{
-			"id": "scenario.informed-illegal-stops",
-			"note": "first plays Ra1-a4; second then plays an informed illegal move (Ke8-e6, attested after the anchor): the chain stops there and the illegal informed ply is not included (the arbiter renders illegalmove against its signer)",
+			"id": "scenario.illegal-only-unfilled",
+			"note": "first plays Ra1-a4 @100; second's only candidate is an illegal live move Ke8-e6 @200 (informed, after the boundary 100): it is skipped, the slot is unfilled (no illegalmove), and the chain stops at the first half-move",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
-				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
-				{ "id": "bad", "seat": "second", "step": 1, "move": ["e8", "e6", null], "attestedAt": 200 }
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 100 },
+				{ "id": "bad", "seat": "second", "step": 1, "move": ["e8", "e6", null], "timedAt": 200 }
 			],
 			"expectedChain": ["m1"]
 		},
 		{
 			"id": "scenario.cutoff-excludes-late-ply",
-			"note": "a third half-move attested after the cutoff is excluded; the chain stops at the second",
+			"note": "a third half-move timed after the cutoff is excluded; the chain stops at the second",
 			"position": "4k^3/8/8/8/8/8/8/R3K^3 / W/w",
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
-				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 },
-				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "attestedAt": 200 },
-				{ "id": "m3", "seat": "first", "step": 2, "move": ["a4", "a5", null], "attestedAt": 2000 }
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 100 },
+				{ "id": "m2", "seat": "second", "step": 1, "move": ["e8", "e7", null], "timedAt": 200 },
+				{ "id": "m3", "seat": "first", "step": 2, "move": ["a4", "a5", null], "timedAt": 2000 }
 			],
 			"expectedChain": ["m1", "m2"]
 		},
@@ -73,7 +99,7 @@
 			"t0": 0,
 			"cutoff": 1000,
 			"plies": [
-				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "attestedAt": 100 }
+				{ "id": "m1", "seat": "first", "step": 1, "move": ["a1", "a4", null], "timedAt": 100 }
 			],
 			"expectedChain": ["m1"]
 		}
