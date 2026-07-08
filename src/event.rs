@@ -11,12 +11,15 @@
 //! - [`AdjudicationRequest`] (kind `6424`) — a player's invocation of the
 //!   arbiter.
 //!
-//! A deliberate omission encodes a protocol invariant in the types: neither
-//! [`Ply`] nor [`AdjudicationRequest`] carries its own `created_at`. A suite
-//! event's `created_at` is the signer's self-claim and MUST NOT drive timing or
-//! race resolution (kind `6423` §Time accounting; kind `6424` §Invocation
-//! timing); the authoritative timing is the [`Attestation`]'s `created_at`.
-//! Leaving the field out of the model makes the misuse unrepresentable.
+//! Timing depends on the session's mode. A suite event's own `created_at` is the
+//! signer's self-claim. When the session designates a timestamper (attested
+//! mode), that self-claim is superseded by the [`Attestation`]'s `created_at`
+//! and never drives race resolution (kind `6423` §Time accounting; kind `6424`
+//! §Invocation timing). When the session is self-timed — no timestamper, the
+//! default — there is no attestation, and the relay-enforced `created_at` IS the
+//! canonical timing (nostr-integration §Timing). [`Ply`] and
+//! [`AdjudicationRequest`] therefore carry `created_at`; it is consulted only in
+//! the self-timed branch of [`crate::race_resolution::canonical_timing`].
 //!
 //! Identity is carried by [`EventId`] and [`PublicKey`], 32-byte newtypes over
 //! the canonical Nostr encoding. [`EventId`] is ordered: the byte order is the
@@ -121,8 +124,9 @@ fn write_hex(f: &mut core::fmt::Formatter<'_>, bytes: &[u8; 32]) -> core::fmt::R
 /// A played half-move (kind `6423`).
 ///
 /// `content` is the opaque move encoding; its syntax and legality are the
-/// kernel's concern, not this model's. The event's own `created_at` is omitted
-/// by design (see the module documentation).
+/// kernel's concern, not this model's. `created_at` is the event's relay-enforced
+/// timestamp — the canonical timing in self-timed mode, ignored in attested mode
+/// (see the module documentation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ply {
     /// The Ply event's id (race-resolution tiebreak).
@@ -139,6 +143,9 @@ pub struct Ply {
     pub draw: bool,
     /// The played half-move, in the rule system's encoding.
     pub content: String,
+    /// The event's own (relay-enforced) `created_at`. The canonical timing when
+    /// the session is self-timed; ignored when a timestamper attests it.
+    pub created_at: Timestamp,
 }
 
 impl Ply {
@@ -152,6 +159,7 @@ impl Ply {
         step: u32,
         draw: bool,
         content: String,
+        created_at: Timestamp,
     ) -> Self {
         Self {
             id,
@@ -160,6 +168,7 @@ impl Ply {
             step,
             draw,
             content,
+            created_at,
         }
     }
 }
@@ -203,8 +212,8 @@ impl Attestation {
 /// An Adjudication Request (kind `6424`): a player's invocation of the arbiter.
 ///
 /// Carries no claims — the arbiter rules on the natural state of events. The
-/// event's own `created_at` is omitted by design; the request's authoritative
-/// timing is its [`Attestation`]'s `created_at`.
+/// request's authoritative timing is its [`Attestation`]'s `created_at` in
+/// attested mode, or its own relay-enforced `created_at` when self-timed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdjudicationRequest {
     /// The request event's id.
@@ -215,18 +224,28 @@ pub struct AdjudicationRequest {
     pub session: EventId,
     /// The designated arbiter named by the request's `p` tag.
     pub arbiter: PublicKey,
+    /// The event's own (relay-enforced) `created_at` — the canonical cutoff
+    /// timing when the session is self-timed; ignored when attested.
+    pub created_at: Timestamp,
 }
 
 impl AdjudicationRequest {
     /// Assembles a typed adjudication request.
     #[inline]
     #[must_use]
-    pub const fn new(id: EventId, signer: PublicKey, session: EventId, arbiter: PublicKey) -> Self {
+    pub const fn new(
+        id: EventId,
+        signer: PublicKey,
+        session: EventId,
+        arbiter: PublicKey,
+        created_at: Timestamp,
+    ) -> Self {
         Self {
             id,
             signer,
             session,
             arbiter,
+            created_at,
         }
     }
 }
@@ -283,10 +302,12 @@ mod tests {
             7,
             true,
             "[\"e2\",\"e4\",null]".to_owned(),
+            Timestamp::from_unix(1000),
         );
         assert_eq!(ply.step, 7);
         assert!(ply.draw);
         assert_eq!(ply.signer, PublicKey::from_bytes([2; 32]));
+        assert_eq!(ply.created_at, Timestamp::from_unix(1000));
     }
 
     #[test]
@@ -308,8 +329,10 @@ mod tests {
             PublicKey::from_bytes([2; 32]),
             EventId::from_bytes([4; 32]),
             PublicKey::from_bytes([5; 32]),
+            Timestamp::from_unix(2000),
         );
         assert_eq!(request.session, EventId::from_bytes([4; 32]));
         assert_eq!(request.arbiter, PublicKey::from_bytes([5; 32]));
+        assert_eq!(request.created_at, Timestamp::from_unix(2000));
     }
 }

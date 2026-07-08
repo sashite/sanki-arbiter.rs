@@ -199,7 +199,7 @@ fn scenario_conformance() {
         let params = SessionParams::new(
             session,
             pk(ARBITER),
-            pk(TIMESTAMPER),
+            Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
             neutral_time_control(),
@@ -220,6 +220,9 @@ fn scenario_conformance() {
                     ply.step,
                     false,
                     content,
+                    // Attested here, so the ply's own created_at is ignored; seed it with
+                    // the attested time for consistency.
+                    Timestamp::from_unix(ply.timed_at),
                 )
             })
             .collect();
@@ -244,7 +247,13 @@ fn scenario_conformance() {
             Timestamp::from_unix(scenario.cutoff),
         ));
 
-        let request = AdjudicationRequest::new(request_id, pk(FIRST), session, pk(ARBITER));
+        let request = AdjudicationRequest::new(
+            request_id,
+            pk(FIRST),
+            session,
+            pk(ARBITER),
+            Timestamp::from_unix(scenario.cutoff),
+        );
 
         let natural =
             natural_state(&params, &plies, &attestations, &request).expect("attested request");

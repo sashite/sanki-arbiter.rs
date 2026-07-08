@@ -4,6 +4,29 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-07-08
+
+Adds **self-timed** adjudication: a session may designate no timestamper (the
+default — attestation is a dormant capability), in which case each event's own
+relay-enforced `created_at` is its canonical timing (nostr-integration §Timing).
+
+### Changed — breaking
+
+- **`SessionParams` takes `Option<PublicKey>` for the timestamper.**
+  `SessionParams::new`'s `timestamper` argument and `SessionParams::timestamper()`
+  are now `Option<PublicKey>`; `None` means self-timed. `is_timestamper` is always
+  `false` for a self-timed session.
+- **`Ply` and `AdjudicationRequest` now carry `created_at`.** Their `::new`
+  constructors take a trailing `Timestamp`. It is the canonical timing in
+  self-timed mode and ignored (superseded by the attestation) in attested mode.
+- **`canonical_ply` takes `Option<PublicKey>`** for the timestamper.
+
+### Added
+
+- **`race_resolution::canonical_timing`** — resolves an event's canonical timing
+  in either mode: the timestamper's attestation (attested) or the event's own
+  `created_at` (self-timed).
+
 ## [0.4.0] — 2026-07-06
 
 Revises the forgiving-premove model to the **two-window** selection: a

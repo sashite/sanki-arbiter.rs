@@ -81,7 +81,15 @@ mod tests {
     }
 
     fn ply(id: u8, signer: u8, step: u32, draw: bool) -> Ply {
-        Ply::new(eid(id), pk(signer), eid(SESSION), step, draw, String::new())
+        Ply::new(
+            eid(id),
+            pk(signer),
+            eid(SESSION),
+            step,
+            draw,
+            String::new(),
+            ts(0),
+        )
     }
 
     fn params() -> SessionParams {
@@ -89,7 +97,7 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             pk(2),
-            pk(99),
+            Some(pk(99)),
             pk(FIRST),
             pk(SECOND),
             TimeControl::new(period, Vec::new()),
@@ -99,7 +107,7 @@ mod tests {
     }
 
     fn request(signer: u8) -> AdjudicationRequest {
-        AdjudicationRequest::new(eid(170), pk(signer), eid(SESSION), pk(2))
+        AdjudicationRequest::new(eid(170), pk(signer), eid(SESSION), pk(2), ts(0))
     }
 
     #[test]

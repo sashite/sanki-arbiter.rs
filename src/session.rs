@@ -8,9 +8,12 @@
 //!   the per-player variants (carried by the initial position's styles), the
 //!   initial position, the arbiter (its signer), and the session's event id;
 //! - from the **founding** (kinds `6420`/`6421` or `6418`/`6419`): the time
-//!   control and the designated timestamper;
-//! - from the **Session Start Attestation** (kind `1041` attesting the Game
-//!   Session): t₀, the canonical session start.
+//!   control and the OPTIONAL designated timestamper (absent → the session is
+//!   self-timed, its canonical timing being the events' own relay-enforced
+//!   `created_at`; attestation is a dormant capability);
+//! - from t₀, the canonical session start — the Session Start Attestation (kind
+//!   `1041`) in attested mode, or the Game Session's own `created_at` when
+//!   self-timed.
 //!
 //! This module is a pure aggregate plus the lookups the arbiter layers need:
 //! mapping a signer to its side, naming the player on a side, recognizing the
@@ -33,7 +36,8 @@ use sashite_sanki_engine::position::Position;
 pub struct SessionParams {
     session: EventId,
     arbiter: PublicKey,
-    timestamper: PublicKey,
+    /// The designated timestamper (attested mode), or `None` when self-timed.
+    timestamper: Option<PublicKey>,
     first: PublicKey,
     second: PublicKey,
     time_control: TimeControl,
@@ -53,7 +57,7 @@ impl SessionParams {
     pub const fn new(
         session: EventId,
         arbiter: PublicKey,
-        timestamper: PublicKey,
+        timestamper: Option<PublicKey>,
         first: PublicKey,
         second: PublicKey,
         time_control: TimeControl,
@@ -86,10 +90,11 @@ impl SessionParams {
         self.arbiter
     }
 
-    /// The designated timestamper (whose attestations are authoritative).
+    /// The designated timestamper (whose attestations are authoritative), or
+    /// `None` when the session is self-timed (no timestamper was designated).
     #[inline]
     #[must_use]
-    pub const fn timestamper(&self) -> PublicKey {
+    pub const fn timestamper(&self) -> Option<PublicKey> {
         self.timestamper
     }
 
@@ -144,11 +149,13 @@ impl SessionParams {
         pubkey == self.first || pubkey == self.second
     }
 
-    /// Whether `pubkey` is the designated timestamper.
+    /// Whether `pubkey` is the designated timestamper. Always `false` for a
+    /// self-timed session (which designates none), so no event is ever treated
+    /// as an authoritative attestation there.
     #[inline]
     #[must_use]
     pub fn is_timestamper(&self, pubkey: PublicKey) -> bool {
-        pubkey == self.timestamper
+        self.timestamper == Some(pubkey)
     }
 
     /// The side on move at the 1-based position `half_move` of the play order,
@@ -231,7 +238,7 @@ mod tests {
         SessionParams::new(
             id(1),
             pk(2),
-            pk(3),
+            Some(pk(3)),
             pk(10),
             pk(20),
             time_control(),
@@ -263,6 +270,28 @@ mod tests {
         assert!(!p.is_player(pk(3))); // the timestamper is not a player
         assert!(p.is_timestamper(pk(3)));
         assert!(!p.is_timestamper(pk(10)));
+    }
+
+    #[test]
+    fn self_timed_session_designates_no_timestamper() {
+        // A self-timed session carries no timestamper: the accessor is None and no
+        // pubkey is ever recognised as the (absent) timestamper.
+        let p = SessionParams::new(
+            id(1),
+            pk(2),
+            None,
+            pk(10),
+            pk(20),
+            time_control(),
+            Position::parse(START_FEEN).expect("valid Sanki FEEN"),
+            Timestamp::from_unix(1000),
+        );
+        assert_eq!(p.timestamper(), None);
+        assert!(!p.is_timestamper(pk(3)));
+        assert!(!p.is_timestamper(pk(10)));
+        // Players and play order still resolve normally.
+        assert_eq!(p.player(Side::First), pk(10));
+        assert_eq!(p.player_at(2), pk(20));
     }
 
     #[test]
@@ -298,6 +327,7 @@ mod tests {
         let p = params();
         assert_eq!(p.session(), id(1));
         assert_eq!(p.arbiter(), pk(2));
+        assert_eq!(p.timestamper(), Some(pk(3)));
         assert_eq!(p.anchor(), Timestamp::from_unix(1000));
         assert_eq!(p.initial_position().to_feen(), START_FEEN);
     }

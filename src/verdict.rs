@@ -197,6 +197,7 @@ mod tests {
             step,
             false,
             content.to_owned(),
+            ts(0),
         )
     }
 
@@ -208,6 +209,7 @@ mod tests {
             step,
             true,
             content.to_owned(),
+            ts(0),
         )
     }
 
@@ -216,7 +218,7 @@ mod tests {
     }
 
     fn request(signer: u8) -> AdjudicationRequest {
-        AdjudicationRequest::new(eid(REQUEST), pk(signer), eid(SESSION), pk(2))
+        AdjudicationRequest::new(eid(REQUEST), pk(signer), eid(SESSION), pk(2), ts(0))
     }
 
     fn params(feen: &str, tc_secs: u64, anchor: i64) -> SessionParams {
@@ -224,7 +226,7 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             pk(2),
-            pk(TIMESTAMPER),
+            Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
             TimeControl::new(period, Vec::new()),

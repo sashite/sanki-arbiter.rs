@@ -9,11 +9,13 @@
 //!
 //! For each play-order position (`(signer, step)` under Sanki's strict
 //! alternation), the candidates are the Plies for that slot whose canonical
-//! attestation `created_at` lies in `[t₀, cutoff]` — `t₀` the session start, the
-//! `cutoff` the triggering Request's canonical attestation (so a player cannot
-//! race the arbiter by playing after invoking). The slot's **anchor** is the
-//! predecessor half-move's canonical attestation (`t₀` for the first slot), and
-//! [`select_candidate`] resolves the candidates against it (the boundary `T`):
+//! timing lies in `[t₀, cutoff]` — `t₀` the session start, the `cutoff` the
+//! triggering Request's canonical timing (so a player cannot race the arbiter by
+//! playing after invoking). Canonical timing is the designated timestamper's
+//! attestation in attested mode, or the event's own relay-enforced `created_at`
+//! when self-timed. The slot's **anchor** is the predecessor half-move's canonical
+//! timing (`t₀` for the first slot), and [`select_candidate`] resolves the
+//! candidates against it (the boundary `T`):
 //!
 //! - **applied** — the selected Ply is applied to the board: the *latest* legal
 //!   premove (anterior, timed before `T`), else the *earliest* legal live move
@@ -29,11 +31,12 @@
 //! end position for the post-chain resolution ([`crate::verdict`]). There is no
 //! `illegalmove` termination — an illegal Ply is skipped, never a loss.
 //!
-//! If the Request is not yet canonically attested the cutoff is undefined and the
-//! natural state cannot be computed ([`natural_state`] returns `None`).
+//! In attested mode, if the Request is not yet canonically attested the cutoff is
+//! undefined and the natural state cannot be computed ([`natural_state`] returns
+//! `None`); self-timed, the request's own `created_at` is always a defined cutoff.
 
 use crate::event::{AdjudicationRequest, Attestation, EventId, Ply};
-use crate::race_resolution::{canonical_attestation, CanonicalPly};
+use crate::race_resolution::{canonical_timing, CanonicalPly};
 use crate::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
 use crate::session::SessionParams;
 use sashite_sanki_engine::domain::half_move::Move;
@@ -65,7 +68,7 @@ pub struct NaturalState<'a> {
     /// position `i + 1`. A skipped illegal candidate is **not** included (it is not
     /// a played half-move); a terminating *applied* Ply (a mating move, …) **is**.
     pub chain: Vec<CanonicalPly<'a>>,
-    /// The cutoff: the triggering Request's canonical attestation `created_at`.
+    /// The cutoff: the triggering Request's canonical timing.
     pub cutoff: Timestamp,
     /// How the chain concluded (terminal verdict or ongoing end position).
     pub conclusion: Conclusion,
@@ -118,8 +121,10 @@ struct SlotCandidate<'a> {
 /// Computes the natural state of `plies`/`attestations` for the session, cut off
 /// at the canonical attestation timing of `request`.
 ///
-/// Returns `None` if `request` has no canonical attestation from the designated
-/// timestamper (the cutoff is undefined — the arbiter must wait).
+/// Returns `None` if `request` has no canonical timing (attested mode: no
+/// attestation from the designated timestamper yet — the cutoff is undefined and
+/// the arbiter must wait). Self-timed, the cutoff is the request's own
+/// `created_at`, always defined.
 #[must_use]
 pub fn natural_state<'a>(
     params: &SessionParams,
@@ -132,7 +137,7 @@ pub fn natural_state<'a>(
     let start = params.anchor(); // t₀: the lower bound and the first slot's anchor.
 
     // The cutoff: the Request's authoritative timing. Undefined ⇒ cannot rule.
-    let cutoff = canonical_attestation(attestations, request.id, timestamper)?.created_at;
+    let cutoff = canonical_timing(attestations, request.id, request.created_at, timestamper)?;
 
     let mut chain: Vec<CanonicalPly<'a>> = Vec::new();
     let mut state = params.initial_state();
@@ -149,7 +154,7 @@ pub fn natural_state<'a>(
             .iter()
             .filter(|ply| ply.session == session && ply.signer == signer && ply.step == step_no)
             .filter_map(|ply| {
-                let at = canonical_attestation(attestations, ply.id, timestamper)?.created_at;
+                let at = canonical_timing(attestations, ply.id, ply.created_at, timestamper)?;
                 (at >= start && at <= cutoff).then(|| SlotCandidate {
                     ply,
                     candidate: Candidate {
@@ -249,6 +254,12 @@ mod tests {
     }
 
     fn ply(id: u8, signer: u8, step: u32, content: &str) -> Ply {
+        ply_at(id, signer, step, content, 0)
+    }
+
+    // A ply with an explicit relay-enforced created_at — its canonical timing when
+    // self-timed. In the attested tests below, created_at is ignored, so `ply` seeds 0.
+    fn ply_at(id: u8, signer: u8, step: u32, content: &str, created_at: i64) -> Ply {
         Ply::new(
             eid(id),
             pk(signer),
@@ -256,6 +267,7 @@ mod tests {
             step,
             false,
             content.to_owned(),
+            ts(created_at),
         )
     }
 
@@ -268,7 +280,7 @@ mod tests {
         SessionParams::new(
             eid(SESSION),
             pk(2),
-            pk(TIMESTAMPER),
+            Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
             TimeControl::new(period, Vec::new()),
@@ -281,8 +293,22 @@ mod tests {
         params_feen(ROOK_KING)
     }
 
+    fn params_self_timed() -> SessionParams {
+        let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
+        SessionParams::new(
+            eid(SESSION),
+            pk(2),
+            None, // self-timed: no timestamper designated
+            pk(FIRST),
+            pk(SECOND),
+            TimeControl::new(period, Vec::new()),
+            Position::parse(ROOK_KING).expect("valid FEEN"),
+            ts(0),
+        )
+    }
+
     fn request() -> AdjudicationRequest {
-        AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2))
+        AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(0))
     }
 
     fn cutoff_att(at: i64) -> Attestation {
@@ -313,6 +339,41 @@ mod tests {
         assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
         assert_eq!(*ns.chain[2].ply.id.as_bytes(), [3; 32]);
         assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+    }
+
+    #[test]
+    fn self_timed_chain_uses_event_created_at() {
+        // No timestamper and no attestations: the chain is assembled from the plies'
+        // own relay-enforced created_at, and the cutoff from the request's own.
+        let plies = [
+            ply_at(1, FIRST, 1, RA1A4, 100),
+            ply_at(2, SECOND, 1, KE8E7, 200),
+            ply_at(3, FIRST, 2, RA4A5, 300),
+        ];
+        let no_atts: Vec<Attestation> = Vec::new();
+        let request =
+            AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(1000));
+        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &request)
+            .expect("self-timed request has canonical timing");
+        assert_eq!(ns.chain.len(), 3);
+        assert_eq!(ns.next_half_move(), 4);
+        assert_eq!(*ns.chain[0].ply.id.as_bytes(), [1; 32]);
+        assert_eq!(ns.chain[0].at, ts(100));
+        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+    }
+
+    #[test]
+    fn self_timed_cutoff_excludes_a_later_ply() {
+        // The request's own created_at is the cutoff: a ply created after it is excluded.
+        let plies = [
+            ply_at(1, FIRST, 1, RA1A4, 100),
+            ply_at(2, SECOND, 1, KE8E7, 500),
+        ];
+        let no_atts: Vec<Attestation> = Vec::new();
+        let request =
+            AdjudicationRequest::new(eid(REQUEST), pk(FIRST), eid(SESSION), pk(2), ts(300));
+        let ns = natural_state(&params_self_timed(), &plies, &no_atts, &request).expect("request");
+        assert_eq!(ns.chain.len(), 1); // ply 2 (created_at 500 > cutoff 300) is excluded
     }
 
     #[test]
