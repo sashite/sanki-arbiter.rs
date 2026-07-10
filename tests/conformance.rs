@@ -12,6 +12,10 @@
 //!   asserted **selected chain** is the consensus property — the TypeScript client
 //!   replays the same `scenarios.json` through `forgivingPlyChain` and must select
 //!   the same chain, so the arbiter cannot finalise a chain the client would not.
+//!   Since v4 (ADR-0010) each vector also pins the **termination**: the replay must
+//!   conclude `Terminal` with the expected status on the chain's last ply (the
+//!   background draws — insufficiency, repetition, the move limit — truncate it),
+//!   or still be `Ongoing` when `expectedTermination` is null.
 //!
 //! The TypeScript client runs both files, so the two implementations cannot drift on
 //! which Ply is canonical.
@@ -27,9 +31,10 @@
 use std::path::PathBuf;
 
 use sashite_sanki_arbiter::event::{AdjudicationRequest, Attestation, EventId, Ply, PublicKey};
-use sashite_sanki_arbiter::natural_state::natural_state;
+use sashite_sanki_arbiter::natural_state::{natural_state, Conclusion};
 use sashite_sanki_arbiter::selection::{select_candidate, Candidate, Selection};
 use sashite_sanki_arbiter::session::SessionParams;
+use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::time::{Duration, Timestamp};
 use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
 use sashite_sanki_engine::position::Position;
@@ -131,6 +136,15 @@ struct ScenarioVector {
     plies: Vec<ScenarioPly>,
     #[serde(rename = "expectedChain")]
     expected_chain: Vec<String>,
+    /// The natural termination at the chain's tip (v4, ADR-0010): `{ status }`, or
+    /// null / absent for a still-ongoing end position.
+    #[serde(rename = "expectedTermination", default)]
+    expected_termination: Option<ScenarioTermination>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScenarioTermination {
+    status: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -266,6 +280,22 @@ fn scenario_conformance() {
         assert_eq!(
             chain, scenario.expected_chain,
             "scenario {}: selected chain mismatch",
+            scenario.id
+        );
+
+        // The replay's conclusion must match the pinned termination: a terminal
+        // verdict with the expected status, or a still-ongoing end position.
+        let actual_termination = match &natural.conclusion {
+            Conclusion::Terminal(Verdict::Terminated { status, .. }, _) => Some(status.to_string()),
+            Conclusion::Terminal(Verdict::Ongoing, _) | Conclusion::Ongoing(_) => None,
+        };
+        let expected_termination = scenario
+            .expected_termination
+            .as_ref()
+            .map(|termination| termination.status.clone());
+        assert_eq!(
+            actual_termination, expected_termination,
+            "scenario {}: termination mismatch",
             scenario.id
         );
     }
