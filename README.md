@@ -67,7 +67,7 @@ canonically attested conforming Request not yet adjudicated.
 
 ```toml
 [dependencies]
-sashite-sanki-arbiter = "0.4"
+sashite-sanki-arbiter = "0.6"
 ```
 
 ```rust

@@ -4,6 +4,27 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-14
+
+Tracks the engine's variant-specific **dead-position detection**
+(`sashite-sanki-engine` 0.3.0, rules update of 2026-07-13). The arbiter's own
+logic is unchanged — the detection lives entirely in the engine's replay — but
+verdicts differ where the rules changed: a pure-chess replay now ends in an
+immediate `insufficient` draw on K+B vs K, K+N vs K, and same-coloured-Bishops
+material, and pure ōgi never draws by dead position.
+
+### Changed — breaking
+
+- **`sashite-sanki-engine` bumped to 0.3** — a breaking engine release whose
+  types appear in this crate's public API. No source change was required.
+
+### Added
+
+- Conformance scenario `scenario.deadposition-chess-kb-closes-the-chain`
+  (shared corpus v4): the capture that leaves King + Bishop versus King closes
+  the chain on that ply and rules `insufficient`; the opponent's legal reply
+  is void.
+
 ## [0.5.0] — 2026-07-08
 
 Adds **self-timed** adjudication: a session may designate no timestamper (the
