@@ -140,6 +140,11 @@ struct ScenarioVector {
     position: String,
     t0: i64,
     cutoff: i64,
+    /// The session's time control (v5): `[duration, increment, plies]` period
+    /// triples in kind-6420 order. Absent -> a neutral control that never flags,
+    /// so the vector pins selection only.
+    #[serde(rename = "timeControl", default)]
+    time_control: Option<Vec<PeriodTriple>>,
     plies: Vec<ScenarioPly>,
     #[serde(rename = "expectedChain")]
     expected_chain: Vec<String>,
@@ -153,6 +158,9 @@ struct ScenarioVector {
 struct ScenarioTermination {
     status: String,
 }
+
+/// A v5 `timeControl` period: `[duration, increment, plies]` (kind-6420 order).
+type PeriodTriple = (u64, Option<u64>, Option<u32>);
 
 #[derive(serde::Deserialize)]
 struct ScenarioPly {
@@ -199,6 +207,23 @@ fn neutral_time_control() -> TimeControl {
     TimeControl::new(period, Vec::new())
 }
 
+/// The scenario's time control (v5 `timeControl` triples), or the neutral one.
+fn scenario_time_control(spec: &Option<Vec<PeriodTriple>>) -> TimeControl {
+    let Some(triples) = spec else {
+        return neutral_time_control();
+    };
+    let mut periods = triples.iter().map(|(duration, increment, plies)| {
+        Period::new(
+            Duration::from_secs(*duration),
+            increment.map(Duration::from_secs),
+            *plies,
+        )
+        .expect("valid scenario period")
+    });
+    let first = periods.next().expect("non-empty scenario timeControl");
+    TimeControl::new(first, periods.collect())
+}
+
 #[test]
 fn scenario_conformance() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/conformance/scenarios.json");
@@ -223,7 +248,7 @@ fn scenario_conformance() {
             Some(pk(TIMESTAMPER)),
             pk(FIRST),
             pk(SECOND),
-            neutral_time_control(),
+            scenario_time_control(&scenario.time_control),
             Position::parse(&scenario.position).expect("valid FEEN"),
             Timestamp::from_unix(scenario.t0),
         );
