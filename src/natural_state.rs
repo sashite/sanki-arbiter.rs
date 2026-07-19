@@ -94,8 +94,10 @@ impl NaturalState<'_> {
 }
 
 /// Whether `content` is a legal half-move in `position`'s state, under the full
-/// rule system (the engine's `step` path, which includes ōgi uchifuzume — not the
-/// mechanical `engine::validate`). Legality is resolved **before** the clock, so a
+/// rule system, judged through the engine's `step` path — which enforces ōgi
+/// uchifuzume, as does `engine::validate` since engine 0.4 (the two paths agree
+/// on legality; `step` is kept as the arbiter's single replay primitive).
+/// Legality is resolved **before** the clock, so a
 /// legal-but-timed-out move is still legal here; an unparseable content is illegal.
 fn is_legal(state: &SessionState, content: &str, at: Timestamp) -> bool {
     let Ok(mv) = Move::parse(content) else {

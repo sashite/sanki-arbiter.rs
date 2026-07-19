@@ -25,8 +25,12 @@ signature-verified, and parsed — there is no cryptography and no I/O here:
 - `AdjudicationRequest` — a request to rule on a session (kind 6424);
 - `EventId` / `PublicKey` — opaque 32-byte identities.
 
-All timing is anchored on the timestamper's attestations, never on an event's own
-declarative `created_at`.
+Timing depends on the session's **mode**: in *attested* mode (a designated
+timestamper) each event's canonical timing is its attestation's `created_at`,
+the event's own being an informational self-claim; in *self-timed* mode (no
+timestamper — the Sashité default for `sanki`) the event's own relay-enforced
+`created_at` is the canonical timing. `Ply` and `AdjudicationRequest` carry
+their `created_at` for the self-timed case.
 
 ## Adjudication
 
@@ -34,8 +38,9 @@ declarative `created_at`.
 on a session, cut off at the triggering Request's canonical attestation:
 
 - **race resolution** gives each Ply a canonical timing (its attestation's
-  `created_at`, then smallest event id) — `step` being each signer's own move
-  ordinal;
+  `created_at` in attested mode, its own relay-enforced `created_at` when
+  self-timed; smallest event id as tiebreaker) — `step` being each signer's
+  own move ordinal;
 - the **natural state** replays the interleaved play order (within each step
   value, side `first` before side `second`), selecting each
   `(session, signer, step)` slot's canonical Ply by the **two-window forgiving**
@@ -51,8 +56,9 @@ on a session, cut off at the triggering Request's canonical attestation:
   order: draw acceptance, abandonment timeout, **residual resignation** (decisive
   against the invoker, whatever the turn).
 
-`adjudicate` returns `None` only when the Request is not yet canonically
-attested, or its signer is not a session player. Selecting **which** Request to
+`adjudicate` returns `None` only when the Request has no canonical timing
+(attested mode, not yet attested by the designated timestamper), or its signer
+is not a session player. Selecting **which** Request to
 rule on is the caller's concern: Sashité's arbiter rules on the earliest
 canonically attested conforming Request not yet adjudicated.
 
@@ -67,7 +73,7 @@ canonically attested conforming Request not yet adjudicated.
 
 ```toml
 [dependencies]
-sashite-sanki-arbiter = "0.6"
+sashite-sanki-arbiter = "0.7"
 ```
 
 ```rust
@@ -88,11 +94,13 @@ let first = PublicKey::from_bytes([10; 32]);
 let second = PublicKey::from_bytes([20; 32]);
 
 // The session's invariant parameters, including the initial position (FEEN).
+// A designated timestamper puts the session in attested mode; `None` would
+// make it self-timed (each event's own `created_at` authoritative).
 let period = Period::new(Duration::from_secs(600), None, None).expect("valid period");
 let params = SessionParams::new(
     session,
     arbiter,
-    timestamper,
+    Some(timestamper),
     first,
     second,
     TimeControl::new(period, Vec::new()),
@@ -100,7 +108,9 @@ let params = SessionParams::new(
     Timestamp::from_unix(0),
 );
 
-// One ply: the first player plays Ra1-a8, a back-rank mate.
+// One ply: the first player plays Ra1-a8, a back-rank mate. In attested mode
+// the ply's own `created_at` (last argument) is an informational self-claim;
+// the timestamper's attestation below is authoritative.
 let plies = [Ply::new(
     EventId::from_bytes([1; 32]),
     first,
@@ -108,11 +118,18 @@ let plies = [Ply::new(
     1,
     false,
     r#"["a1","a8",null]"#.to_owned(),
+    Timestamp::from_unix(90),
 )];
 
 // The second player requests adjudication; the timestamper has attested both the
 // ply (t=100) and the request (t=1000, the cutoff).
-let request = AdjudicationRequest::new(EventId::from_bytes([170; 32]), second, session, arbiter);
+let request = AdjudicationRequest::new(
+    EventId::from_bytes([170; 32]),
+    second,
+    session,
+    arbiter,
+    Timestamp::from_unix(900),
+);
 let attestations = [
     Attestation::new(
         EventId::from_bytes([101; 32]),
@@ -137,7 +154,8 @@ assert_eq!(adjudication.score(Side::First), 100);
 ## Built on
 
 [`sashite-sanki-engine`](https://github.com/sashite/sanki-engine.rs) (the rules
-engine), which it uses to replay and validate plies.
+engine), which it uses to replay and validate plies under the full rule system
+— ōgi's uchifuzume included, via the kernel's per-ply step.
 
 ## Minimum supported Rust version
 

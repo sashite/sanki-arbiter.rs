@@ -1,15 +1,4 @@
-//! `sashite-sanki-arbiter` — adjudication logic for the Sanki game suite, built
-//! for Sashité.
-//!
-//! The L2 layer over the `sashite-sanki-engine` crate: it rules on a session from
-//! its attested event chain and emits the Adjudication —
-//! `adjudicate(params, plies, attestations, request) -> Option<Adjudication>`.
-//!
-//! The event model is **abstract** and carries no Nostr dependency: `Ply`,
-//! `Attestation`, and `AdjudicationRequest` are plain values the caller has
-//! already received, signature-verified, and parsed. Timing is anchored on the
-//! timestamper's attestations, never on an event's own declarative `created_at`.
-
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), warn(missing_docs))]
 

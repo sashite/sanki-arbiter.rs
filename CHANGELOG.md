@@ -4,6 +4,36 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-07-19
+
+Tracks the engine's **uchifuzume-exact release** (`sashite-sanki-engine`
+0.4.0). The arbiter's own adjudication logic is unchanged: candidate legality
+was already judged through the kernel's `step` path, which enforced uchifuzume
+before and after this release — the engine change chiefly brings the façade
+(`validate` / `legal_moves` / `status`) into line with the legality this crate
+always applied. One exactness corner does reach verdicts through the replay:
+checkmate/stalemate classification is now uchifuzume-aware
+(`has_full_legal_move`), so the vanishingly rare position whose only escape
+would be a mating Fu drop now terminates `checkmate` instead of playing on.
+
+### Changed — breaking
+
+- **`sashite-sanki-engine` bumped to 0.4** — a breaking engine release whose
+  types appear in this crate's public API: `IllegalReason` gains the
+  `Uchifuzume` variant, which kernel outcomes now report for a mating Fu drop
+  (previously folded into `IllegalDrop`). No source change was required; the
+  `is_legal` doc comment no longer contrasts the kernel path with
+  `engine::validate`, the two agreeing on legality since 0.4.
+
+### Fixed
+
+- **README brought back in line with the self-timed API** (0.5's breaking
+  changes had not reached it): the usage example now passes the optional
+  timestamper (`Option<PublicKey>`) and the events' `created_at`, and the
+  timing prose describes both modes. The crate docs now include the README
+  (`#![doc = include_str!…]`, the engine's pattern), so the example is a
+  doc-test and can no longer rot silently.
+
 ## [0.6.0] — 2026-07-14
 
 Tracks the engine's variant-specific **dead-position detection**
