@@ -9,9 +9,17 @@
 //!
 //! For each play-order position (`(signer, step)` under Sanki's strict
 //! alternation), the candidates are the Plies for that slot whose canonical
-//! timing lies in `[t₀, cutoff]` — `t₀` the session start, the `cutoff` the
+//! timing lies in `[t₀, cutoff]` — `t₀` the session start (a Ply timed before
+//! t₀ is invalid, kind `6423` §Time accounting, and never enters a slot —
+//! deciders' confirmation of 2026-07-19), the `cutoff` the
 //! triggering Request's canonical timing (so a player cannot race the arbiter by
-//! playing after invoking). Canonical timing is the designated timestamper's
+//! playing after invoking). Identical-content re-submissions are idempotent
+//! retries, not alternatives: per content, only the **race-canonical
+//! representative** (smallest canonical timing, then smallest event id — kind
+//! `6423` §Race resolution) enters the two-window selection, so duplicates
+//! neither shift the selected timing nor consume cap slots. Legality is probed
+//! **lazily** through [`select_candidate`]'s callback, on the capped windows
+//! only (≤ 2K full-rule probes per slot). Canonical timing is the designated timestamper's
 //! attestation in attested mode, or the event's own relay-enforced `created_at`
 //! when self-timed. The slot's **anchor** is the predecessor half-move's canonical
 //! timing (`t₀` for the first slot), and [`select_candidate`] resolves the
@@ -41,11 +49,12 @@ use crate::selection::{select_candidate, Candidate, Selection, CANDIDATE_CAP};
 use crate::session::SessionParams;
 use sashite_sanki_engine::domain::half_move::Move;
 use sashite_sanki_engine::domain::outcome::Verdict;
-use sashite_sanki_engine::domain::status::Status;
 use sashite_sanki_engine::domain::time::Timestamp;
 use sashite_sanki_engine::engine::validate;
 use sashite_sanki_engine::kernel::state::SessionState;
-use sashite_sanki_engine::kernel::step::step;
+use sashite_sanki_engine::kernel::step::{step, StepResult};
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 
 /// How the replayed chain ends.
 #[derive(Debug, Clone)]
@@ -145,27 +154,55 @@ pub fn natural_state<'a>(
         let signer = params.player_at(half_move);
         let step_no = params.step_at(half_move);
 
-        // Candidates for this slot: canonically attested within [t₀, cutoff],
-        // each judged for legality on the live replayed board.
-        let slot: Vec<SlotCandidate<'a>> = plies
+        // Candidates for this slot: canonically timed within [t₀, cutoff] (a
+        // pre-t₀ Ply is invalid and never enters — kind 6423 §Time accounting).
+        let timed: Vec<SlotCandidate<'a>> = plies
             .iter()
             .filter(|ply| ply.session == session && ply.signer == signer && ply.step == step_no)
             .filter_map(|ply| {
                 let at = canonical_timing(attestations, ply.id, ply.created_at, timestamper)?;
-                (at >= start && at <= cutoff).then(|| SlotCandidate {
+                (at >= start && at <= cutoff).then_some(SlotCandidate {
                     ply,
                     candidate: Candidate {
                         id: ply.id,
                         created_at: at,
-                        legal: is_legal(&state, &ply.content),
                     },
                 })
             })
             .collect();
 
+        // Identical-content re-submissions collapse to their race-canonical
+        // representative — smallest (canonical timing, event id) — before the
+        // two-window rule (Move Encoding — Sanki §Slot candidates and
+        // selection; kind 6423 §Race resolution).
+        let mut representatives: BTreeMap<&str, SlotCandidate<'a>> = BTreeMap::new();
+        for entrant in timed {
+            match representatives.entry(entrant.ply.content.as_str()) {
+                Entry::Vacant(vacant) => {
+                    vacant.insert(entrant);
+                }
+                Entry::Occupied(mut occupied) => {
+                    let held = &occupied.get().candidate;
+                    let contender = &entrant.candidate;
+                    if (contender.created_at, contender.id) < (held.created_at, held.id) {
+                        occupied.insert(entrant);
+                    }
+                }
+            }
+        }
+        let slot: Vec<SlotCandidate<'a>> = representatives.into_values().collect();
+
         let candidates: Vec<Candidate<EventId>> = slot.iter().map(|sc| sc.candidate).collect();
 
-        match select_candidate(anchor, &candidates, CANDIDATE_CAP) {
+        // The legality probe: consulted lazily by the selection, on the capped
+        // windows only — the ≤ 2K normative bound.
+        let probe = |id: &EventId| {
+            slot.iter()
+                .find(|sc| sc.ply.id == *id)
+                .is_some_and(|sc| is_legal(&state, &sc.ply.content))
+        };
+
+        match select_candidate(anchor, &candidates, CANDIDATE_CAP, probe) {
             // No candidate is legal in either window: the chain stops, still ongoing.
             Selection::Unfilled => break Conclusion::Ongoing(Box::new(state)),
 
@@ -189,30 +226,24 @@ pub fn natural_state<'a>(
                     break Conclusion::Ongoing(Box::new(state));
                 };
 
-                // The probe validated the candidate, so `step` can only reject
-                // it on a broken apply/canonicalize invariant (`Malformed`) —
-                // unreachable on a well-formed position. Clone defensively so
-                // that even then the chain degrades to an ongoing end (an
-                // illegal Ply is never a loss), never to an `illegalmove`
-                // verdict outside the status vocabulary.
-                let result = step(state.clone(), &mv, at);
-                if matches!(
-                    result.outcome.verdict,
-                    Verdict::Terminated {
-                        status: Status::IllegalMove,
-                        ..
+                // The probe validated the candidate, so a rejection here is a
+                // broken internal invariant — unreachable on a well-formed
+                // position. The rejection hands the state back untouched:
+                // degrade to an ongoing end (an illegal Ply is never a loss).
+                let (outcome, next) = match step(state, &mv, at) {
+                    StepResult::Illegal { state, .. } => {
+                        break Conclusion::Ongoing(Box::new(state))
                     }
-                ) {
-                    break Conclusion::Ongoing(Box::new(state));
-                }
+                    StepResult::Advanced { outcome, next } => (outcome, next),
+                };
                 chain.push(CanonicalPly { ply, at });
-                match result.next {
-                    Some(next) => {
-                        state = next;
+                match next {
+                    Some(successor) => {
+                        state = successor;
                         anchor = at;
                         half_move = half_move.saturating_add(1);
                     }
-                    None => break Conclusion::Terminal(result.outcome.verdict, at),
+                    None => break Conclusion::Terminal(outcome.verdict, at),
                 }
             }
         }
@@ -550,6 +581,66 @@ mod tests {
     }
 
     #[test]
+    fn identical_content_duplicates_collapse_to_the_race_canonical() {
+        // Two identical-content premoves for (second, step 1) — @50 id 2 and a
+        // retry @60 id 3: idempotent retries, not alternatives. The
+        // representative is the race-canonical (smallest timing, then id), so
+        // the selected ply is id 2 @50 — its timing then anchors the next slot.
+        let plies = [
+            ply(1, FIRST, 1, RA1A4),
+            ply(2, SECOND, 1, KE8E7),
+            ply(3, SECOND, 1, KE8E7),
+        ];
+        let atts = [
+            att(101, 1, 200),
+            att(102, 2, 50),
+            att(103, 3, 60),
+            cutoff_att(1000),
+        ];
+        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        assert_eq!(ns.chain.len(), 2);
+        assert_eq!(*ns.chain[1].ply.id.as_bytes(), [2; 32]);
+        assert_eq!(ns.chain[1].at, ts(50));
+    }
+
+    #[test]
+    fn pre_t0_candidates_are_ignored() {
+        // A Ply timed before t₀ is invalid (kind 6423 §Time accounting) and
+        // never enters its slot — deciders' confirmation of 2026-07-19.
+        let plies = [ply(1, FIRST, 1, RA1A4)];
+        let atts = [att(101, 1, -5), cutoff_att(1000)];
+        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        assert!(ns.is_empty());
+        assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+    }
+
+    #[test]
+    fn played_ply_timeout_terminates_the_chain() {
+        // A legal ply timed beyond the mover's 600 s budget (@700): the replay
+        // surfaces the played-Ply timeout as the terminal conclusion, anchored
+        // at that ply's canonical timing.
+        use sashite_sanki_engine::domain::status::Status;
+
+        let plies = [ply(1, FIRST, 1, RA1A4)];
+        let atts = [att(101, 1, 700), cutoff_att(1000)];
+        let ns = natural_state(&params(), &plies, &atts, &request()).expect("attested request");
+        assert_eq!(ns.chain.len(), 1);
+        match ns.conclusion {
+            Conclusion::Terminal(verdict, at) => {
+                assert!(matches!(
+                    verdict,
+                    Verdict::Terminated {
+                        status: Status::Timeout,
+                        ..
+                    }
+                ));
+                assert_eq!(at, ts(700));
+            }
+            Conclusion::Ongoing(_) => panic!("expected a played-ply timeout"),
+        }
+    }
+
+    #[test]
     fn is_legal_matches_the_kernel_step_oracle() {
         use super::is_legal;
         use sashite_sanki_engine::domain::half_move::Move;
@@ -557,21 +648,17 @@ mod tests {
         use sashite_sanki_engine::kernel::state::SessionState;
         use sashite_sanki_engine::kernel::step::step;
 
-        // The historical probe this crate used through 0.7.0: a full kernel
-        // step on a cloned state, illegal iff the verdict is an `IllegalMove`
-        // termination. The validate-based `is_legal` must agree on every
-        // legality class — the engine-0.4 façade/kernel alignment this crate
-        // now relies on.
+        // The kernel-step oracle: since engine 0.5 an illegal ply is a
+        // `StepResult::Illegal` rejection. The validate-based `is_legal` must
+        // agree on every legality class — the façade/kernel alignment this
+        // crate relies on.
         let oracle = |state: &SessionState, content: &str| {
             let Ok(mv) = Move::parse(content) else {
                 return false;
             };
             !matches!(
-                step(state.clone(), &mv, ts(30)).outcome.verdict,
-                Verdict::Terminated {
-                    status: Status::IllegalMove,
-                    ..
-                }
+                step(state.clone(), &mv, ts(30)),
+                sashite_sanki_engine::kernel::step::StepResult::Illegal { .. }
             )
         };
 

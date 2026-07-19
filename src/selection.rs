@@ -27,31 +27,38 @@
 //! there is **no `illegalmove` outcome**. Legality is a precondition in both
 //! windows; the window governs only which legal candidate binds when several exist.
 //!
-//! This module is the pure decision primitive — it consumes each candidate's
-//! `legal` as a given (established by replaying the board, [`crate::natural_state`])
-//! and pins only the *selection*. It is driven directly by the shared
+//! This module is the pure decision primitive — it consumes a **legality
+//! probe** the caller supplies (backed by replaying the board,
+//! [`crate::natural_state`]) and pins only the *selection*. Legality is probed
+//! **lazily, on the capped windows only** — at most `2K` probes per slot, the
+//! normative anti-flooding bound of Move Encoding — Sanki §Bounding a slot's
+//! candidates: a flood of candidates costs sorting, never unbounded
+//! full-rule-system replays. It is driven directly by the shared
 //! `selection.json` conformance vectors, so the arbiter and the TypeScript client
 //! agree bit-for-bit on which Ply is canonical.
+//!
+//! Identical-content re-submissions are **deduplicated upstream** (they are
+//! idempotent retries, not alternatives — [`crate::natural_state`] keeps the
+//! race-canonical representative per content before calling this rule).
 
 use sashite_sanki_engine::domain::time::Timestamp;
 
 /// The per-window candidate cap `K`: at most the `K` most-recent anterior
 /// candidates, or the `K` earliest informed ones, are considered (≤ `2K` legality
 /// tests per slot). `K > 1` leaves room for an honest re-premove or retry; a player
-/// flooding their own window past `K` only self-harms. Deployment-tunable.
+/// flooding their own window past `K` only self-harms. A compile-time constant
+/// of this crate (a deployment tunes it by recompiling).
 pub const CANDIDATE_CAP: usize = 8;
 
 /// A slot candidate reduced to what selection needs: its identity (the race
-/// tiebreak), its canonical attestation timing, and its legality in the slot's
-/// replayed position.
+/// tiebreak) and its canonical timing. Legality is NOT carried — it is probed
+/// lazily, through the caller's callback, on the capped windows only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Candidate<Id> {
     /// The candidate's identity — the event-id race tiebreak.
     pub id: Id,
     /// The candidate's canonical attestation `created_at`.
     pub created_at: Timestamp,
-    /// Whether the candidate is legal in the slot's position (full rule system).
-    pub legal: bool,
 }
 
 /// The outcome of selecting among a slot's candidates.
@@ -77,14 +84,17 @@ impl<Id> Selection<'_, Id> {
 
 /// Selects the canonical candidate for a slot with the given `boundary`.
 ///
-/// `candidates` is the slot's unordered candidate set (each already legality-
-/// judged). A candidate is *anterior* iff `created_at < boundary`, else *informed*.
-/// Implements the two-window rule above, with the per-window cap `cap` (`K`).
+/// `candidates` is the slot's unordered candidate set. A candidate is *anterior*
+/// iff `created_at < boundary`, else *informed*. Implements the two-window rule
+/// above, with the per-window cap `cap` (`K`); `is_legal` is the caller's
+/// legality probe, consulted **only** for candidates inside a capped window —
+/// at most `2 × cap` probes per call, however many candidates are flooded.
 #[must_use]
 pub fn select_candidate<'a, Id: Ord>(
     boundary: Timestamp,
     candidates: &'a [Candidate<Id>],
     cap: usize,
+    mut is_legal: impl FnMut(&Id) -> bool,
 ) -> Selection<'a, Id> {
     // Anterior window (premoves, created_at < boundary): the K most recent by
     // (created_at, id), newest first — the first legal is the LATEST legal premove
@@ -101,7 +111,7 @@ pub fn select_candidate<'a, Id: Ord>(
     if let Some(chosen) = anterior
         .into_iter()
         .take(cap)
-        .find(|candidate| candidate.legal)
+        .find(|candidate| is_legal(&candidate.id))
     {
         return Selection::Applied(chosen);
     }
@@ -121,7 +131,7 @@ pub fn select_candidate<'a, Id: Ord>(
     if let Some(chosen) = informed
         .into_iter()
         .take(cap)
-        .find(|candidate| candidate.legal)
+        .find(|candidate| is_legal(&candidate.id))
     {
         return Selection::Applied(chosen);
     }
@@ -145,29 +155,33 @@ mod tests {
         Timestamp::from_unix(secs)
     }
 
-    /// `(id, created_at, legal)` → a candidate with a `&str` id.
-    fn cand(id: &'static str, created_at: i64, legal: bool) -> Candidate<&'static str> {
+    /// `(id, created_at)` → a candidate with a `&str` id.
+    fn cand(id: &'static str, created_at: i64) -> Candidate<&'static str> {
         Candidate {
             id,
             created_at: ts(created_at),
-            legal,
         }
+    }
+
+    /// A legality probe: legal iff the id appears in `legal`.
+    fn probe(legal: &'static [&'static str]) -> impl FnMut(&&'static str) -> bool {
+        move |id| legal.contains(id)
     }
 
     #[test]
     fn single_informed_legal_applied() {
-        let cs = [cand("a1", 120, true)];
+        let cs = [cand("a1", 120)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["a1"])),
             Selection::Applied(&cs[0])
         );
     }
 
     #[test]
     fn single_illegal_unfilled() {
-        let cs = [cand("a1", 120, false)];
+        let cs = [cand("a1", 120)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&[])),
             Selection::Unfilled
         );
     }
@@ -175,9 +189,9 @@ mod tests {
     #[test]
     fn anterior_latest_legal_wins() {
         // Two legal premoves (both before the boundary): the later — the re-premove — wins.
-        let cs = [cand("a1", 20, true), cand("a2", 60, true)];
+        let cs = [cand("a1", 20), cand("a2", 60)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["a1", "a2"])),
             Selection::Applied(&cs[1])
         );
     }
@@ -185,9 +199,9 @@ mod tests {
     #[test]
     fn anterior_skips_newest_illegal_to_next_legal() {
         // The newest premove is illegal; the next-newest legal premove wins.
-        let cs = [cand("a1", 20, true), cand("a2", 60, false)];
+        let cs = [cand("a1", 20), cand("a2", 60)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["a1"])),
             Selection::Applied(&cs[0])
         );
     }
@@ -195,18 +209,18 @@ mod tests {
     #[test]
     fn informed_earliest_legal_wins() {
         // Two legal live moves (both at/after the boundary): the earliest wins.
-        let cs = [cand("a1", 10, true), cand("a2", 20, true)];
+        let cs = [cand("a1", 10), cand("a2", 20)];
         assert_eq!(
-            select_candidate(ts(0), &cs, CANDIDATE_CAP),
+            select_candidate(ts(0), &cs, CANDIDATE_CAP, probe(&["a1", "a2"])),
             Selection::Applied(&cs[0])
         );
     }
 
     #[test]
     fn informed_skips_earliest_illegal_to_next_legal() {
-        let cs = [cand("a1", 10, false), cand("a2", 20, true)];
+        let cs = [cand("a1", 10), cand("a2", 20)];
         assert_eq!(
-            select_candidate(ts(0), &cs, CANDIDATE_CAP),
+            select_candidate(ts(0), &cs, CANDIDATE_CAP, probe(&["a2"])),
             Selection::Applied(&cs[1])
         );
     }
@@ -214,9 +228,9 @@ mod tests {
     #[test]
     fn legal_anterior_preferred_over_informed() {
         // A legal premove binds even though a legal live move also exists.
-        let cs = [cand("p1", 50, true), cand("L1", 150, true)];
+        let cs = [cand("p1", 50), cand("L1", 150)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["p1", "L1"])),
             Selection::Applied(&cs[0])
         );
     }
@@ -224,18 +238,18 @@ mod tests {
     #[test]
     fn fallthrough_to_informed_when_no_legal_anterior() {
         // The only premove is illegal → fall through to the earliest legal live move.
-        let cs = [cand("p1", 50, false), cand("L1", 150, true)];
+        let cs = [cand("p1", 50), cand("L1", 150)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["L1"])),
             Selection::Applied(&cs[1])
         );
     }
 
     #[test]
     fn all_illegal_both_windows_unfilled() {
-        let cs = [cand("p1", 50, false), cand("L1", 150, false)];
+        let cs = [cand("p1", 50), cand("L1", 150)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&[])),
             Selection::Unfilled
         );
     }
@@ -243,9 +257,9 @@ mod tests {
     #[test]
     fn anterior_tie_breaks_by_largest_id_first() {
         // Equal timing in the anterior window: the more recent is the larger id.
-        let cs = [cand("b1", 60, true), cand("b2", 60, true)];
+        let cs = [cand("b1", 60), cand("b2", 60)];
         assert_eq!(
-            select_candidate(ts(100), &cs, CANDIDATE_CAP),
+            select_candidate(ts(100), &cs, CANDIDATE_CAP, probe(&["b1", "b2"])),
             Selection::Applied(&cs[1])
         );
     }
@@ -253,9 +267,9 @@ mod tests {
     #[test]
     fn informed_tie_breaks_by_smallest_id_first() {
         // Equal timing in the informed window: the earliest is the smaller id.
-        let cs = [cand("b1", 20, true), cand("b2", 20, true)];
+        let cs = [cand("b1", 20), cand("b2", 20)];
         assert_eq!(
-            select_candidate(ts(0), &cs, CANDIDATE_CAP),
+            select_candidate(ts(0), &cs, CANDIDATE_CAP, probe(&["b1", "b2"])),
             Selection::Applied(&cs[0])
         );
     }
@@ -265,15 +279,14 @@ mod tests {
         // cap K=2 considers the 2 MOST RECENT premoves (both illegal); an older legal
         // premove is beyond the cap → unfilled (flooding one's own recent premoves is
         // self-harm).
-        let cs = [
-            cand("a1", 10, true),
-            cand("a2", 800, false),
-            cand("a3", 900, false),
-        ];
-        assert_eq!(select_candidate(ts(1000), &cs, 2), Selection::Unfilled);
+        let cs = [cand("a1", 10), cand("a2", 800), cand("a3", 900)];
+        assert_eq!(
+            select_candidate(ts(1000), &cs, 2, probe(&["a1"])),
+            Selection::Unfilled
+        );
         // With K=3 the older legal premove is reached.
         assert_eq!(
-            select_candidate(ts(1000), &cs, 3),
+            select_candidate(ts(1000), &cs, 3, probe(&["a1"])),
             Selection::Applied(&cs[0])
         );
     }
@@ -282,27 +295,54 @@ mod tests {
     fn cap_informed_earliest_buries_later_legal() {
         // cap K=2 considers the 2 EARLIEST live moves (both illegal); a later legal
         // live move is beyond the cap → unfilled.
-        let cs = [
-            cand("a1", 10, false),
-            cand("a2", 20, false),
-            cand("a3", 30, true),
-        ];
-        assert_eq!(select_candidate(ts(0), &cs, 2), Selection::Unfilled);
-        assert_eq!(select_candidate(ts(0), &cs, 3), Selection::Applied(&cs[2]));
+        let cs = [cand("a1", 10), cand("a2", 20), cand("a3", 30)];
+        assert_eq!(
+            select_candidate(ts(0), &cs, 2, probe(&["a3"])),
+            Selection::Unfilled
+        );
+        assert_eq!(
+            select_candidate(ts(0), &cs, 3, probe(&["a3"])),
+            Selection::Applied(&cs[2])
+        );
+    }
+
+    #[test]
+    fn legality_probes_are_bounded_by_the_cap() {
+        // The normative anti-flooding bound (Move Encoding — Sanki §Bounding a
+        // slot's candidates): 20 candidates flooded on each side of the
+        // boundary, cap K=2 — at most 2K probes, whatever the flood size.
+        let mut cs: Vec<Candidate<usize>> = Vec::new();
+        for i in 0..20 {
+            cs.push(Candidate {
+                id: i,
+                created_at: ts(i64::try_from(i).expect("small")),
+            }); // anterior (< 100)
+            cs.push(Candidate {
+                id: 100 + i,
+                created_at: ts(200 + i64::try_from(i).expect("small")),
+            }); // informed
+        }
+        let mut probes = 0usize;
+        let selection = select_candidate(ts(100), &cs, 2, |_id| {
+            probes += 1;
+            false // everything illegal: both windows scanned to their cap
+        });
+        assert_eq!(selection, Selection::Unfilled);
+        assert!(probes <= 4, "expected at most 2K = 4 probes, got {probes}");
     }
 
     #[test]
     fn first_slot_boundary_t0_is_informed() {
         // boundary = t₀ = 0: a candidate at/after 0 is informed; an illegal one is
         // skipped (no `illegalmove`), leaving the slot unfilled.
-        let legal = [cand("a1", 5, true)];
+        let legal = [cand("a1", 5)];
         assert_eq!(
-            select_candidate(ts(0), &legal, CANDIDATE_CAP),
+            select_candidate(ts(0), &legal, CANDIDATE_CAP, probe(&["a1"])),
             Selection::Applied(&legal[0])
         );
-        let illegal = [cand("a1", 5, false)];
+        let illegal = [cand("a1", 5)];
         assert_eq!(
-            select_candidate(ts(0), &illegal, CANDIDATE_CAP),
+            select_candidate(ts(0), &illegal, CANDIDATE_CAP, probe(&[])),
             Selection::Unfilled
         );
     }

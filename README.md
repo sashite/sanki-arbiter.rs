@@ -48,7 +48,12 @@ on a session, cut off at the triggering Request's canonical attestation:
   timing, t₀ for the first slot): among *anterior* candidates (timed before `T` —
   premoves) the **latest legal** wins; failing that, among *informed* candidates
   (timed at/after `T` — live moves) the **earliest legal** wins; each within a
-  per-window cap `K`. An illegal candidate — premove or live — is always
+  per-window cap `K`, legality probed **lazily on the capped windows only**
+  (≤ 2K full-rule probes per slot, the normative anti-flooding bound). A Ply
+  timed before t₀ is invalid and never enters a slot; identical-content
+  re-submissions are idempotent retries, collapsed to their race-canonical
+  representative (smallest timing, then event id) before selection. An illegal
+  candidate — premove or live — is always
   **skipped**, never a loss (there is no `illegalmove`);
 - the verdict is entirely **play-derived** (there is no equivocation sanction):
   a termination reached during replay — a rule-system ending or a played-Ply
@@ -56,11 +61,13 @@ on a session, cut off at the triggering Request's canonical attestation:
   order: draw acceptance, abandonment timeout, **residual resignation** (decisive
   against the invoker, whatever the turn).
 
-`adjudicate` returns `None` only when the Request has no canonical timing
-(attested mode, not yet attested by the designated timestamper), or its signer
-is not a session player. Selecting **which** Request to
-rule on is the caller's concern: Sashité's arbiter rules on the earliest
-canonically attested conforming Request not yet adjudicated.
+`adjudicate` returns `None` only when the Request is non-conforming — it does
+not reference this session and this arbiter, or its signer is not a session
+player (kind 6424 §Semantic constraints, items 2–4) — or when it has no
+canonical timing yet. Several Requests may coexist; `select_request` pins the
+deterministic **which Request rules** policy (earliest canonical timing,
+smallest event id as tiebreaker, among conforming timed Requests) — "not yet
+adjudicated" stays the caller's ledger.
 
 ## Design guarantees
 
@@ -73,7 +80,7 @@ canonically attested conforming Request not yet adjudicated.
 
 ```toml
 [dependencies]
-sashite-sanki-arbiter = "0.7"
+sashite-sanki-arbiter = "0.8"
 ```
 
 ```rust
@@ -154,8 +161,11 @@ assert_eq!(adjudication.score(Side::First), 100);
 ## Built on
 
 [`sashite-sanki-engine`](https://github.com/sashite/sanki-engine.rs) (the rules
-engine), which it uses to replay and validate plies under the full rule system
-— ōgi's uchifuzume included, via the kernel's per-ply step.
+engine), which it uses under the full rule system — ōgi's uchifuzume included:
+candidate legality is probed via the façade's `validate`, and the selected Ply
+is applied via the kernel's per-ply step (whose `StepResult::Illegal`, since
+engine 0.5, hands the state back — the defensive seam this crate degrades to an
+ongoing end).
 
 ## Minimum supported Rust version
 

@@ -4,9 +4,10 @@
 //! Two vendored corpora (copies of the shared set at `web-specs.md/nostr/conformance`):
 //!
 //! - `selection.json` — the pure per-slot rule, driven through [`select_candidate`].
-//!   Each candidate carries its own `legal` (a given), so it pins only the
-//!   *selection algorithm*: the two windows (anterior latest-legal / informed
-//!   earliest-legal) split at the `boundary`, and the per-window cap `K`.
+//!   Each vector candidate's `legal` is a given, supplied to the selection as
+//!   its legality probe, so the file pins only the *selection algorithm*: the
+//!   two windows (anterior latest-legal / informed earliest-legal) split at the
+//!   `boundary`, and the per-window cap `K`.
 //! - `scenarios.json` — full sessions, driven through [`natural_state`]: a founding
 //!   position, plies with their canonical-attestation timings, and a cutoff. The
 //!   asserted **selected chain** is the consensus property — the TypeScript client
@@ -101,12 +102,18 @@ fn selection_conformance() {
             .map(|candidate| Candidate {
                 id: candidate.id.clone(),
                 created_at: Timestamp::from_unix(candidate.created_at),
-                legal: candidate.legal,
             })
             .collect();
+        let legality: std::collections::BTreeMap<&str, bool> = vector
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.id.as_str(), candidate.legal))
+            .collect();
+        let probe = |id: &String| legality.get(id.as_str()).copied().unwrap_or(false);
 
         let boundary = Timestamp::from_unix(vector.boundary);
-        let (result, selected) = outcome(&select_candidate(boundary, &candidates, vector.cap));
+        let (result, selected) =
+            outcome(&select_candidate(boundary, &candidates, vector.cap, probe));
 
         assert_eq!(
             result,

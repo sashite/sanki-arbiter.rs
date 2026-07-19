@@ -26,18 +26,22 @@
 //! resignation is the residual interpretation, a conforming, canonically attested
 //! Request
 //! from a session player **always yields a verdict**. [`adjudicate`] returns
-//! `None` only when the Request is not yet canonically attested (the cutoff is
-//! undefined) or its signer is not a session player (a non-conforming Request,
-//! kind `6424` §Semantic constraints).
+//! `None` only when the Request is non-conforming — it does not reference this
+//! session and this arbiter, or its signer is not a session player (kind
+//! `6424` §Semantic constraints, items 2–4) — or when it has no canonical
+//! timing yet (the cutoff is undefined).
 //!
-//! Selecting **which** Request to rule on — several may coexist, and the
-//! choice fixes the cutoff, hence the verdict — is the caller's concern:
-//! Sashité's arbiter rules on the earliest canonically attested conforming
-//! Request not yet adjudicated (Statuses — Sanki §Which Request rules).
+//! Several Requests may coexist, and the choice of which to rule on fixes the
+//! cutoff, hence the verdict. [`select_request`] pins the deterministic policy
+//! of Statuses — Sanki §Which Request rules — the earliest conforming Request
+//! by canonical timing, smallest event id as tiebreaker; "not yet adjudicated"
+//! stays the caller's ledger (once the canonical Adjudication exists, the
+//! session is terminated and every later Request is moot).
 
 use crate::event::{AdjudicationRequest, Attestation, Ply};
 use crate::implicit::draw_acceptance;
 use crate::natural_state::{natural_state, Conclusion, NaturalState};
+use crate::race_resolution::canonical_timing;
 use crate::session::SessionParams;
 use sashite_sanki_engine::clock::tick;
 use sashite_sanki_engine::domain::outcome::Verdict;
@@ -91,11 +95,11 @@ impl Adjudication {
 }
 
 /// Rules on a session from its public events, cut off at the triggering
-/// Request's canonical attestation.
+/// Request's canonical timing.
 ///
-/// Returns `None` when no ruling is possible: the Request is not yet
-/// canonically attested, or its signer is not a session player (a
-/// non-conforming Request).
+/// Returns `None` when no ruling is possible: the Request is non-conforming
+/// (another session or arbiter, or a non-player signer — kind `6424` §Semantic
+/// constraints, items 2–4), or it has no canonical timing yet.
 #[must_use]
 pub fn adjudicate(
     params: &SessionParams,
@@ -103,6 +107,13 @@ pub fn adjudicate(
     attestations: &[Attestation],
     request: &AdjudicationRequest,
 ) -> Option<Adjudication> {
+    // A Request for another session or another arbiter is non-conforming
+    // (kind 6424 §Semantic constraints, items 2 and 4): no ruling — a
+    // cross-session invocation must never resolve as a resignation here.
+    if request.session != params.session() || request.arbiter != params.arbiter() {
+        return None;
+    }
+
     // A Request from a non-player is non-conforming (kind 6424 §Semantic
     // constraints, item 3): no ruling.
     let invoker = params.side_of(request.signer)?;
@@ -113,6 +124,41 @@ pub fn adjudicate(
 
     let verdict = resolve_play(params, &natural, request, invoker);
     Adjudication::from_verdict(verdict)
+}
+
+/// Selects **which Request rules** (Statuses — Sanki §Which Request rules):
+/// among the conforming Requests — this session, this arbiter, a session-player
+/// signer — that have canonical timing, the earliest by canonical timing,
+/// smallest Request event id as tiebreaker. Returns `None` when no conforming
+/// Request is canonically timed yet.
+///
+/// "Not yet adjudicated" is the caller's ledger: once the canonical
+/// Adjudication exists the session is terminated and every later Request is
+/// moot, so the caller simply stops selecting.
+#[must_use]
+pub fn select_request<'a>(
+    params: &SessionParams,
+    requests: &'a [AdjudicationRequest],
+    attestations: &[Attestation],
+) -> Option<&'a AdjudicationRequest> {
+    requests
+        .iter()
+        .filter(|request| {
+            request.session == params.session()
+                && request.arbiter == params.arbiter()
+                && params.side_of(request.signer).is_some()
+        })
+        .filter_map(|request| {
+            canonical_timing(
+                attestations,
+                request.id,
+                request.created_at,
+                params.timestamper(),
+            )
+            .map(|at| (at, request))
+        })
+        .min_by(|(at_a, req_a), (at_b, req_b)| at_a.cmp(at_b).then_with(|| req_a.id.cmp(&req_b.id)))
+        .map(|(_, request)| request)
 }
 
 /// The verdict the play produces: the natural state's terminal verdict if the
@@ -370,6 +416,61 @@ mod tests {
         let atts = [att(101, 1, 100), att(171, REQUEST, 1000)];
         let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
         assert!(adjudicate(&p, &plies, &atts, &request(77)).is_none());
+    }
+
+    #[test]
+    fn cross_session_request_no_verdict() {
+        // A Request referencing another session is non-conforming (kind 6424
+        // §Semantic constraints, item 2): no ruling — never a resignation in
+        // the wrong session.
+        let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
+        let atts = [att(101, 1, 100), att(171, REQUEST, 400)];
+        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        let foreign = AdjudicationRequest::new(eid(REQUEST), pk(SECOND), eid(51), pk(2), ts(0));
+        assert!(adjudicate(&p, &plies, &atts, &foreign).is_none());
+    }
+
+    #[test]
+    fn wrong_arbiter_request_no_verdict() {
+        // A Request naming another arbiter is non-conforming (item 4).
+        let plies = [ply(1, FIRST, 1, "[\"a1\",\"a4\",null]")];
+        let atts = [att(101, 1, 100), att(171, REQUEST, 400)];
+        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        let foreign =
+            AdjudicationRequest::new(eid(REQUEST), pk(SECOND), eid(SESSION), pk(7), ts(0));
+        assert!(adjudicate(&p, &plies, &atts, &foreign).is_none());
+    }
+
+    #[test]
+    fn select_request_earliest_conforming_timed() {
+        use super::select_request;
+
+        let p = params("4k^3/8/8/8/8/8/8/R3K^3 / W/w", 600, 0);
+        let requests = [
+            // Conforming, attested @300.
+            AdjudicationRequest::new(eid(170), pk(FIRST), eid(SESSION), pk(2), ts(0)),
+            // Conforming, attested @200 — the earliest: rules.
+            AdjudicationRequest::new(eid(172), pk(SECOND), eid(SESSION), pk(2), ts(0)),
+            // Non-conforming (foreign session), attested @100: skipped.
+            AdjudicationRequest::new(eid(174), pk(FIRST), eid(51), pk(2), ts(0)),
+            // Conforming but unattested: pending, skipped.
+            AdjudicationRequest::new(eid(176), pk(FIRST), eid(SESSION), pk(2), ts(0)),
+        ];
+        let atts = [att(201, 170, 300), att(202, 172, 200), att(203, 174, 100)];
+        let selected = select_request(&p, &requests, &atts).expect("a request rules");
+        assert_eq!(*selected.id.as_bytes(), [172; 32]);
+
+        // Tie on timing: the smallest Request event id rules.
+        let tied = [
+            AdjudicationRequest::new(eid(180), pk(FIRST), eid(SESSION), pk(2), ts(0)),
+            AdjudicationRequest::new(eid(178), pk(SECOND), eid(SESSION), pk(2), ts(0)),
+        ];
+        let tied_atts = [att(211, 180, 500), att(212, 178, 500)];
+        let selected = select_request(&p, &tied, &tied_atts).expect("a request rules");
+        assert_eq!(*selected.id.as_bytes(), [178; 32]);
+
+        // No conforming timed Request at all: None.
+        assert!(select_request(&p, &requests[3..], &atts).is_none());
     }
 
     #[test]

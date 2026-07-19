@@ -4,6 +4,54 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-07-19
+
+Conformance release following the global audit, on top of the engine's 0.5
+correctness release.
+
+### Fixed
+
+- **Identical-content re-submissions are deduplicated.** They are idempotent
+  retries, not alternatives (Move Encoding — Sanki §Slot candidates and
+  selection): per content, only the race-canonical representative — smallest
+  canonical timing, then smallest event id (kind 6423 §Race resolution) —
+  enters the two-window selection. Previously each duplicate was a distinct
+  alternative, so the anterior window could select the *latest* duplicate,
+  shifting the selected event id, the next slot's boundary and the clock
+  anchor; duplicates also consumed cap slots.
+- **Request conformance is fully enforced.** `adjudicate` now returns `None`
+  for a Request that does not reference this session and this arbiter (kind
+  6424 §Semantic constraints, items 2 and 4) — a cross-session invocation can
+  no longer resolve as a resignation in the wrong session. Item 3 (the signer
+  is a session player) was already enforced.
+- **The candidate cap now bounds the legality work.** Legality is probed
+  lazily through a callback, on the capped windows only — at most 2K
+  full-rule-system probes per slot (the normative anti-flooding bound of Move
+  Encoding — Sanki §Bounding a slot's candidates); a flood of candidates
+  previously cost one full probe each.
+
+### Changed — breaking
+
+- **`sashite-sanki-engine` bumped to 0.5** (public-API types): the nine-status
+  vocabulary (`Status::IllegalMove` is gone) and the kernel's new `StepResult`
+  enum. The natural-state replay now receives the untouched state back from a
+  (defensively unreachable) `StepResult::Illegal` — the 0.7.1 defensive clone
+  is gone.
+- **`selection::Candidate` no longer carries `legal`**, and `select_candidate`
+  takes the legality probe as a callback (the lazy bound above). The shared
+  `selection.json` vectors drive the same algorithm through the probe.
+
+### Added
+
+- **`verdict::select_request`** — the deterministic "which Request rules"
+  policy of Statuses — Sanki: among conforming, canonically timed Requests,
+  the earliest by (canonical timing, event id). "Not yet adjudicated" stays
+  the caller's ledger.
+- Tests for the audit's coverage gaps: duplicate collapse, pre-t₀ exclusion
+  (normative per kind 6423 §Time accounting, deciders' confirmation of
+  2026-07-19), the played-Ply timeout surfaced by the replay, the ≤ 2K probe
+  bound, and both new Request-conformance rejections.
+
 ## [0.7.1] — 2026-07-19
 
 ### Changed
