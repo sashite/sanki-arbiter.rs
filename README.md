@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/sashite-sanki-arbiter.svg)](https://crates.io/crates/sashite-sanki-arbiter)
 [![Docs.rs](https://docs.rs/sashite-sanki-arbiter/badge.svg)](https://docs.rs/sashite-sanki-arbiter)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/sashite/sanki-arbiter.rs/blob/main/LICENSE)
 
 Adjudication logic for the **Sanki** game suite, built for
 [Sashité](https://sashite.com/). The L2 layer over
@@ -163,4 +163,4 @@ Rust 1.81.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE).
+Licensed under the [Apache License, Version 2.0](https://github.com/sashite/sanki-arbiter.rs/blob/main/LICENSE). See [NOTICE](https://github.com/sashite/sanki-arbiter.rs/blob/main/NOTICE).

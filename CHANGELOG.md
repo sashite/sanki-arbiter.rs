@@ -4,6 +4,22 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-07-19
+
+### Changed
+
+- **perf: candidate legality is probed without cloning.** `is_legal` now asks
+  `engine::validate` on the replayed position — equivalent to the historical
+  kernel-`step` probe since engine 0.4 (uchifuzume included), an agreement
+  pinned by a new step-oracle equivalence test — instead of cloning the whole
+  `SessionState` (history map included) and running a full step, with its
+  terminal classification, per candidate. Applying the selected Ply gains a
+  defensive guard: should `step` reject an already-validated candidate (a
+  broken internal invariant, unreachable on well-formed input), the chain now
+  degrades to an ongoing end — an illegal Ply is never a loss — instead of
+  surfacing an `illegalmove` verdict outside the status vocabulary. Rulings
+  are unchanged.
+
 ## [0.7.0] — 2026-07-19
 
 Tracks the engine's **uchifuzume-exact release** (`sashite-sanki-engine`

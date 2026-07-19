@@ -43,6 +43,7 @@ use sashite_sanki_engine::domain::half_move::Move;
 use sashite_sanki_engine::domain::outcome::Verdict;
 use sashite_sanki_engine::domain::status::Status;
 use sashite_sanki_engine::domain::time::Timestamp;
+use sashite_sanki_engine::engine::validate;
 use sashite_sanki_engine::kernel::state::SessionState;
 use sashite_sanki_engine::kernel::step::step;
 
@@ -93,24 +94,18 @@ impl NaturalState<'_> {
     }
 }
 
-/// Whether `content` is a legal half-move in `position`'s state, under the full
-/// rule system, judged through the engine's `step` path — which enforces ōgi
-/// uchifuzume, as does `engine::validate` since engine 0.4 (the two paths agree
-/// on legality; `step` is kept as the arbiter's single replay primitive).
-/// Legality is resolved **before** the clock, so a
-/// legal-but-timed-out move is still legal here; an unparseable content is illegal.
-fn is_legal(state: &SessionState, content: &str, at: Timestamp) -> bool {
+/// Whether `content` is a legal half-move in `state`'s position, under the full
+/// rule system — `engine::validate`, which since engine 0.4 enforces ōgi
+/// uchifuzume exactly as the kernel's `step` path does (the agreement is pinned
+/// by the `is_legal_matches_the_kernel_step_oracle` test below). Legality is a
+/// position question resolved **before** the clock — a legal-but-timed-out move
+/// is still legal here — and probing it clones no state. An unparseable content
+/// is illegal.
+fn is_legal(state: &SessionState, content: &str) -> bool {
     let Ok(mv) = Move::parse(content) else {
         return false;
     };
-    let outcome = step(state.clone(), &mv, at).outcome;
-    !matches!(
-        outcome.verdict,
-        Verdict::Terminated {
-            status: Status::IllegalMove,
-            ..
-        }
-    )
+    validate(state.position(), &mv).is_ok()
 }
 
 /// A slot candidate paired with its source Ply (so the selection can be mapped
@@ -162,7 +157,7 @@ pub fn natural_state<'a>(
                     candidate: Candidate {
                         id: ply.id,
                         created_at: at,
-                        legal: is_legal(&state, &ply.content, at),
+                        legal: is_legal(&state, &ply.content),
                     },
                 })
             })
@@ -194,7 +189,22 @@ pub fn natural_state<'a>(
                     break Conclusion::Ongoing(Box::new(state));
                 };
 
-                let result = step(state, &mv, at);
+                // The probe validated the candidate, so `step` can only reject
+                // it on a broken apply/canonicalize invariant (`Malformed`) —
+                // unreachable on a well-formed position. Clone defensively so
+                // that even then the chain degrades to an ongoing end (an
+                // illegal Ply is never a loss), never to an `illegalmove`
+                // verdict outside the status vocabulary.
+                let result = step(state.clone(), &mv, at);
+                if matches!(
+                    result.outcome.verdict,
+                    Verdict::Terminated {
+                        status: Status::IllegalMove,
+                        ..
+                    }
+                ) {
+                    break Conclusion::Ongoing(Box::new(state));
+                }
                 chain.push(CanonicalPly { ply, at });
                 match result.next {
                     Some(next) => {
@@ -537,5 +547,70 @@ mod tests {
         assert!(ns.is_empty());
         assert_eq!(ns.next_half_move(), 1);
         assert!(matches!(ns.conclusion, Conclusion::Ongoing(_)));
+    }
+
+    #[test]
+    fn is_legal_matches_the_kernel_step_oracle() {
+        use super::is_legal;
+        use sashite_sanki_engine::domain::half_move::Move;
+        use sashite_sanki_engine::domain::time_control::{Period, TimeControl};
+        use sashite_sanki_engine::kernel::state::SessionState;
+        use sashite_sanki_engine::kernel::step::step;
+
+        // The historical probe this crate used through 0.7.0: a full kernel
+        // step on a cloned state, illegal iff the verdict is an `IllegalMove`
+        // termination. The validate-based `is_legal` must agree on every
+        // legality class — the engine-0.4 façade/kernel alignment this crate
+        // now relies on.
+        let oracle = |state: &SessionState, content: &str| {
+            let Ok(mv) = Move::parse(content) else {
+                return false;
+            };
+            !matches!(
+                step(state.clone(), &mv, ts(30)).outcome.verdict,
+                Verdict::Terminated {
+                    status: Status::IllegalMove,
+                    ..
+                }
+            )
+        };
+
+        let state = |feen: &str, secs: u64| {
+            let period = Period::new(Duration::from_secs(secs), None, None).expect("valid period");
+            SessionState::start(
+                Position::parse(feen).expect("valid FEEN"),
+                TimeControl::new(period, Vec::new()),
+                ts(0),
+            )
+        };
+
+        const OGI_UCHIFUZUME: &str = "7k^/8/5N2/8/8/8/8/4K^1R1 F/ J/j";
+        let cases: &[(&str, u64, &str)] = &[
+            // Chess: a legal move, an unreachable destination, the opponent's
+            // piece, an empty source, unparseable content.
+            (ROOK_KING, 600, RA1A4),
+            (ROOK_KING, 600, "[\"a1\",\"b3\",null]"),
+            (ROOK_KING, 600, "[\"e8\",\"e7\",null]"),
+            (ROOK_KING, 600, "[\"h4\",\"h5\",null]"),
+            (ROOK_KING, 600, "not a ply"),
+            // Ōgi: the mating Fu drop (uchifuzume — the class the engine-0.4
+            // alignment brings to `validate`), a quiet legal drop, a drop on
+            // an occupied square.
+            (OGI_UCHIFUZUME, 600, "[null,\"h7\",\"fu\"]"),
+            (OGI_UCHIFUZUME, 600, "[null,\"h6\",\"fu\"]"),
+            (OGI_UCHIFUZUME, 600, "[null,\"h8\",\"fu\"]"),
+            // Legality before the clock: with a 5 s bank and a 30 s ply, the
+            // oracle sees a `timeout` termination — still a *legal* move.
+            (ROOK_KING, 5, RA1A4),
+        ];
+
+        for (feen, secs, content) in cases {
+            let s = state(feen, *secs);
+            assert_eq!(
+                is_legal(&s, content),
+                oracle(&s, content),
+                "probe/oracle divergence on {content} in {feen} ({secs} s bank)"
+            );
+        }
     }
 }
