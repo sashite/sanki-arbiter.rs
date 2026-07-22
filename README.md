@@ -80,7 +80,7 @@ adjudicated" stays the caller's ledger.
 
 ```toml
 [dependencies]
-sashite-sanki-arbiter = "0.8"
+sashite-sanki-arbiter = "0.9"
 ```
 
 ```rust

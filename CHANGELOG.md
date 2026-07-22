@@ -4,6 +4,36 @@ All notable changes to this crate are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 crate adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-07-22
+
+Follows the engine's 0.6.0 release, which adds the absolute move cap
+(`movecap`) to the shared status vocabulary.
+
+### Changed — breaking
+
+- **`sashite-sanki-engine` bumped to 0.6** (public-API types): the status
+  vocabulary gains `Status::MoveCap` — the absolute 300-move (600-half-move)
+  cap that draws a game once no decisive progress plausibly remains. It is
+  **last** in the terminal priority order, after the resetting 50-move
+  `movelimit`: a genuine mate, stalemate, insufficiency, repetition, or move
+  limit on the 600th half-move still outranks it. A downstream exhaustive
+  `match` on the `Status` this crate re-exposes (e.g. through
+  `Adjudication::status`) must now handle the new arm.
+
+### Added
+
+- **The natural-state replay surfaces the `movecap` draw.** A session that
+  reaches the 600th half-move with no earlier termination now concludes
+  `Terminal(MoveCap)`. No adjudication logic changed — the cap is enforced by
+  the engine kernel the replay drives, and the verdict flows through the
+  crate's generic `Verdict::Terminated { status, .. }` handling untouched.
+- The shared `scenarios.json` gains the
+  `scenario.movecap-on-the-six-hundredth-half-move` vector (corpus **v6**): a
+  600-half-move, capture-free, mate-free game triggering neither the 50-move
+  rule nor a threefold repetition, drawn exactly on the cap. The generic
+  conformance harness (`status.to_string()` against the pinned token) exercises
+  it with no test-code change.
+
 ## [0.8.0] — 2026-07-19
 
 Conformance release following the global audit, on top of the engine's 0.5
